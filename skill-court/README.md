@@ -28,13 +28,14 @@ task checked inside its sandbox afterwards:
 | Skill | What it is | Claude Sonnet 5.5 | Claude Haiku 5.5 |
 |---|---|---|---|
 | `team-changelog` | A team convention the model can't guess | **helps**: success 0% → 100% | **helps**: success 0% → 100% |
-| `sales-csv-totals` | A lesson overgeneralised from one session ("amounts are in cents") | **hurts**: success 100% → 0% | neutral |
+| `sales-csv-totals` | A lesson overgeneralised from one session ("amounts are in cents") | **hurts**: success 100% → 0%, quarantined | neutral: success 100% → 67% |
 | `python-venv-setup` | A setup ritual learned in another repo | neutral | neutral |
 | `json-format` | A harmless tip | neutral | neutral |
 
-Sonnet followed the "cents" rule and got every total wrong; Haiku loaded the same skill and ignored
-it. So `sales-csv-totals` is quarantined for Sonnet 5.5 only. The demo is in `demo/` (see
-[Try it](#try-it)).
+Sonnet followed the "cents" rule on every task, in each of the three trials we ran, so the skill is
+quarantined for Sonnet. Haiku followed it only sometimes (one or two wrong totals out of three in
+two of its three trials), which is not consistent enough for a verdict at three tasks, so Haiku
+still sees it. The demo is in `demo/` (see [Try it](#try-it)).
 
 ## How a trial works
 
@@ -96,6 +97,8 @@ replay profiles for inspection.
 The plugin adds a **Skill Court** page to Hermes Desktop and the Webapp (turn its Desktop half on in
 **Capabilities → Plugins**). It lists the latest verdict per skill and model, a skill's verdicts on
 different models side by side, harmful skills first, and lets you quarantine or release each one.
+
+![The Skill Court page in Hermes Desktop](../docs/desktop.png)
 
 ## Install
 

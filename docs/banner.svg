@@ -25,6 +25,7 @@
       <text x="492" y="402" fill="#a9b0bc" font-size="18">100% → 0%, quarantined</text>
       <rect x="796" y="378" width="104" height="32" rx="4" fill="#262a31"/>
       <text x="808" y="402" fill="#b9bec7">neutral</text>
+      <text x="916" y="402" fill="#a9b0bc" font-size="18">100% → 67%</text>
 
       <text x="72" y="454" fill="#e6e8eb">python-venv-setup</text>
       <rect x="396" y="430" width="104" height="32" rx="4" fill="#262a31"/>

@@ -77,3 +77,11 @@ def test_token_change_ignores_pairs_without_an_outcome():
 def test_intervals_are_reproducible():
     pairs = [pair(True, False), pair(False, True), pair(True, True, 1500, 1000), pair(False, False, 700, 1000)]
     assert score(pairs) == score(pairs)
+
+
+def test_efficiency_verdict_reports_a_success_drop_it_did_not_need():
+    s = score([pair(False, True, 1600, 1000), pair(False, True, 1500, 1000), pair(True, True, 1550, 1000)])
+    assert s.verdict == HURTS
+    assert s.reason.startswith("success went from 100% without the skill to 33% with it")
+    same = score([pair(True, True, 2000, 1000) for _ in range(3)])
+    assert same.reason.startswith("success was the same")

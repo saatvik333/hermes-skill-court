@@ -1,5 +1,5 @@
 name: skill-court
-version: 0.1.0
+version: 1.0.0
 description: >-
   Measures whether each agent-written skill actually helps: replays real tasks with and
   without the skill, scores the difference, and quarantines skills that make results worse

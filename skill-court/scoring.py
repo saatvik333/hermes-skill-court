@@ -102,8 +102,10 @@ def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0
     if success_ci[0] > 0:
         return result(HELPS, f"success rose from {success_without:.0%} without the skill to {success_with:.0%} with it")
     if token_ci is not None and token_change is not None and len(task_ratios) >= min_tasks:
+        change = (f"success went from {success_without:.0%} without the skill to {success_with:.0%} with it"
+                  if success_delta else "success was the same")
         if success_delta <= 0 and token_ci[0] > efficiency_margin:
-            return result(HURTS, f"no gain in success, and runs used {_pct(token_change)} tokens with the skill")
+            return result(HURTS, f"{change}, and runs used {_pct(token_change)} tokens with the skill")
         if success_delta >= 0 and token_ci[1] < -efficiency_margin:
-            return result(HELPS, f"same success, and runs used {_pct(token_change)} tokens with the skill")
+            return result(HELPS, f"{change}, and runs used {_pct(token_change)} tokens with the skill")
     return result(NEUTRAL, "no measurable difference in success or token use")
