@@ -17,6 +17,7 @@ from .skills import Skill
 
 @dataclass(frozen=True)
 class Options:
+    tasks: int = 5
     reps: int = 1
     parallel: int = 4
     timeout: float = 900
@@ -77,12 +78,16 @@ def _describe(result: runner.RunResult, has_check: bool) -> str:
     return f"{line}  ({result.error})" if result.error else line
 
 
-def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Options, budget: Budget,
-        say: Callable[[str], None]) -> Outcome:
-    trial_id = store.start_trial(skill.name, skill.content_hash(), model)
-    workdir = plugin_data_dir(store.PLUGIN) / "runs"
-    workdir.mkdir(parents=True, exist_ok=True)
-    queue = deque((task, rep) for rep in range(opts.reps) for task in tasks)
+Replay = Callable[[store.Task, str], runner.RunResult]
+Record = Callable[[store.Task, int, str, runner.RunResult], None]
+
+
+def adjudicate(tasks: list[store.Task], replay: Replay, opts: Options, budget: Budget, record: Record,
+               say: Callable[[str], None]) -> tuple[scoring.Score, Counter]:
+    """Replay ``tasks`` in both arms and score the pairs. ``replay(task, arm)`` runs one arm once;
+    ``record`` sees every result. Returns the score and how often each model answered."""
+    chosen = tasks[: opts.tasks]
+    queue = deque((task, rep) for rep in range(opts.reps) for task in chosen)
     results: dict[tuple[int, int], dict[str, runner.RunResult]] = {}
     total = len(queue) * len(ARMS)
     finished = 0
@@ -95,10 +100,7 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
             while queue and len(in_flight) + len(ARMS) <= slots and not budget.exhausted:
                 task, rep = queue.popleft()
                 for arm in ARMS:
-                    future = pool.submit(runner.replay, arms.profiles[arm], task.prompt, task.check_cmd,
-                                         workdir=workdir, timeout=opts.timeout, model=opts.model,
-                                         provider=opts.provider)
-                    in_flight[future] = (task, rep, arm)
+                    in_flight[pool.submit(replay, task, arm)] = (task, rep, arm)
             if not in_flight:
                 say(f"  {budget.why_stopped()}; {len(queue)} pair(s) not run")
                 break
@@ -107,12 +109,12 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
                 task, rep, arm = in_flight.pop(future)
                 result = future.result()
                 budget.add(result)
-                store.record_run(trial_id, {"task_id": task.id, "arm": arm, "rep": rep, **result.as_row()})
+                record(task, rep, arm, result)
                 results.setdefault((task.id, rep), {})[arm] = result
                 finished += 1
                 say(f"  [{finished}/{total}] task {task.id} {arm:<7} {_describe(result, task.check_cmd is not None)}")
 
-    checks = {task.id: task.check_cmd is not None for task in tasks}
+    checks = {task.id: task.check_cmd is not None for task in chosen}
     pairs = []
     for (task_id, _rep), by_arm in results.items():
         if len(by_arm) != len(ARMS):
@@ -123,8 +125,24 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
             scoring.Arm(_success(with_run, checks[task_id]), with_run.tokens),
             scoring.Arm(_success(without_run, checks[task_id]), without_run.tokens),
         ))
-    outcome = scoring.score(pairs)
     observed = Counter(r.model for by_arm in results.values() for r in by_arm.values() if r.model)
+    return scoring.score(pairs), observed
+
+
+def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Options, budget: Budget,
+        say: Callable[[str], None]) -> Outcome:
+    trial_id = store.start_trial(skill.name, skill.content_hash(), model)
+    workdir = plugin_data_dir(store.PLUGIN) / "runs"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    def replay(task: store.Task, arm: str) -> runner.RunResult:
+        return runner.replay(arms.profiles[arm], task.prompt, task.check_cmd, workdir=workdir,
+                             timeout=opts.timeout, model=opts.model, provider=opts.provider)
+
+    def record(task: store.Task, rep: int, arm: str, result: runner.RunResult) -> None:
+        store.record_run(trial_id, {"task_id": task.id, "arm": arm, "rep": rep, **result.as_row()})
+
+    outcome, observed = adjudicate(tasks, replay, opts, budget, record, say)
     model = observed.most_common(1)[0][0] if observed else model
     store.finish_trial(trial_id, model, outcome.verdict, json.dumps(asdict(outcome)))
 

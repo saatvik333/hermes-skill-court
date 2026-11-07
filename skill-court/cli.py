@@ -129,15 +129,15 @@ def _cmd_trial(args: argparse.Namespace) -> int:
     for found in mining.mine(names, args.tasks).values():
         for task in found:
             store.add_task(task.skill, task.prompt, None, "mined", task.session_id)
-    selected = {n: store.tasks_for(n)[: args.tasks] for n in names}
+    selected = {n: store.tasks_for(n) for n in names}
     for name in [n for n, ts in selected.items() if not ts]:
         print(f"{name}: no tasks in session history; add one with `hermes court tasks add {name} --prompt ...`")
     selected = {n: ts for n, ts in selected.items() if ts}
     if not selected:
         return 1
 
-    opts = trial.Options(reps=args.reps, parallel=args.parallel, timeout=args.timeout, model=args.model,
-                         provider=args.provider, apply=args.apply)
+    opts = trial.Options(tasks=args.tasks, reps=args.reps, parallel=args.parallel, timeout=args.timeout,
+                         model=args.model, provider=args.provider, apply=args.apply)
     budget = trial.Budget(args.budget, args.allow_unpriced)
     rows = []
     with _trial_lock():
@@ -147,7 +147,7 @@ def _cmd_trial(args: argparse.Namespace) -> int:
                 if budget.exhausted:
                     print(f"{name}: skipped: {budget.why_stopped()}")
                     continue
-                print(f"\n{name}: {len(tasks)} task(s) x {args.reps} rep(s), with and without the skill, "
+                print(f"\n{name}: {min(len(tasks), opts.tasks)} task(s) x {args.reps} rep(s), with and without the skill, "
                       f"on {model or 'the profile model'}")
                 # Fresh clones per skill: nothing one skill's replays did can carry into the next trial.
                 arms.prepare(replay_arms)
