@@ -23,6 +23,15 @@ class CommandError(RuntimeError):
     pass
 
 
+class TimedOut(CommandError):
+    """A command ran past its timeout and was stopped; carries whatever it printed."""
+
+    def __init__(self, message: str, stdout: str, stderr: str) -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 def hermes_binary() -> str:
     found = shutil.which("hermes")
     if not found:
@@ -50,24 +59,29 @@ def child_env() -> dict[str, str]:
 def run(argv: list[str], *, timeout: float, check: bool = True, cwd: str | None = None,
         grace: float = 0) -> subprocess.CompletedProcess:
     """Run ``argv`` and capture its output. Past ``timeout`` the process gets SIGTERM and ``grace``
-    seconds to stop cleanly (a single-query ``hermes chat`` interrupts its turn on SIGTERM), then
-    SIGKILL; either way the call raises ``CommandError``."""
+    seconds to stop cleanly (a single-query ``hermes chat`` interrupts its turn on SIGTERM and
+    still prints its session id), then SIGKILL; either way the call raises ``TimedOut`` with the
+    output collected so far."""
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                           env=child_env(), cwd=cwd) as proc:
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            stdout = stderr = ""
             if grace > 0:
                 proc.terminate()
                 try:
-                    proc.communicate(timeout=grace)
+                    stdout, stderr = proc.communicate(timeout=grace)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.communicate()
-            else:
+                    pass
+            if proc.poll() is None:
                 proc.kill()
-                proc.communicate()
-            raise CommandError(f"`{' '.join(argv[:4])} …` timed out after {timeout:.0f}s") from None
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass  # something the client started still holds the pipes; give up on its output
+            raise TimedOut(f"`{' '.join(argv[:4])} …` timed out after {timeout:.0f}s",
+                           stdout or "", stderr or "") from None
     result = subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
     if check and result.returncode != 0:
         tail = (stderr or stdout).strip().splitlines()[-3:]

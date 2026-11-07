@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .arms import MAX_TURNS, profile_home
-from .procs import CommandError, container_binary, hermes_binary, run
+from .procs import CommandError, TimedOut, container_binary, hermes_binary, run
 
 CHECK_TIMEOUT = 120
 # Seconds a timed-out replay gets after SIGTERM to interrupt its turn before SIGKILL.
@@ -116,17 +116,24 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     if provider:
         argv += ["--provider", provider]
     started = time.monotonic()
-    output = ""
+    stdout = stderr = ""
+    timed_out = False
     try:
         proc = run(argv, timeout=timeout, check=False, cwd=str(workdir), grace=STOP_GRACE)
         result.exit_code = proc.returncode
-        output = f"{proc.stdout}\n{proc.stderr}"
-        found = _SESSION_LINE.search(proc.stderr or "")
-        result.session_id = found.group(1) if found else None
+        stdout, stderr = proc.stdout or "", proc.stderr or ""
+    except TimedOut as exc:
+        # Interrupted at the time limit: no outcome, but its spend and sandbox are still handled.
+        timed_out = True
+        result.error = str(exc)
+        stdout, stderr = exc.stdout, exc.stderr
     except CommandError as exc:
         result.error = str(exc)
     finally:
         query.unlink(missing_ok=True)
+    output = f"{stdout}\n{stderr}"
+    found = _SESSION_LINE.search(stderr)
+    result.session_id = found.group(1) if found else None
     result.seconds = round(time.monotonic() - started, 1)
     if result.session_id is None:
         result.error = result.error or f"no session was reported: {_tail(output) or 'no output'}"
@@ -134,11 +141,13 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
 
     responded = read_session(profile, result.session_id, result)
     # The gateway may not have flushed token counters yet; a completed turn with an answer did respond.
-    responded = responded or (result.exit_code == 0 and bool(proc.stdout.strip()))
+    responded = responded or (result.exit_code == 0 and bool(stdout.strip()))
     try:
         matches = session_containers(profile, result.session_id, _labelled_containers(profile))
         container = matches[0] if len(matches) == 1 else None
-        if not responded:
+        if timed_out:
+            pass  # no outcome; result.error already says it timed out
+        elif not responded:
             result.error = f"no model response: {_tail(output) or 'empty output'}"
         else:
             # 0: the turn completed. 1: it ran but stopped early (iteration or time budget, partial).
