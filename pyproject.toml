@@ -1,0 +1,10 @@
+[project]
+name = "skill-court"
+version = "0.1.0"
+description = "Hermes plugin: per-skill, per-model outcome attribution and non-destructive quarantine"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

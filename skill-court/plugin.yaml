@@ -1,0 +1,11 @@
+name: skill-court
+version: 0.1.0
+description: >-
+  Measures whether each agent-written skill actually helps: replays real tasks with and
+  without the skill, scores the difference, and quarantines skills that make results worse
+  for a given model, without editing the skill's files.
+author: saatvik333
+license: MIT
+requires_hermes: ">=0.23.0"
+provides_hooks:
+  - pre_tool_call
