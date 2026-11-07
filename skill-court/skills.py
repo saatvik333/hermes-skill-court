@@ -16,6 +16,8 @@ class Skill:
     name: str  # the name skill_view accepts
     path: Path  # directory holding SKILL.md
     created_by: str | None
+    # ``hermes curator lock``: core refuses agent edits to a locked skill, and so does an appeal.
+    locked: bool = False
 
     @property
     def agent_authored(self) -> bool:
@@ -50,5 +52,6 @@ def library() -> dict[str, Skill]:
             continue
         record = usage.get(name)
         created_by = record.get("created_by") if isinstance(record, dict) else None
-        found[name] = Skill(name=name, path=Path(skill_dir), created_by=created_by)
+        locked = bool(record.get("locked")) if isinstance(record, dict) else False
+        found[name] = Skill(name=name, path=Path(skill_dir), created_by=created_by, locked=locked)
     return found

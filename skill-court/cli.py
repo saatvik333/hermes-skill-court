@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterator
 from hermes_constants import get_hermes_home, profile_name_for_home
 from plugins.plugin_storage import plugin_data_dir
 
-from . import arms, auto, mining, scoring, skills, store, trial
+from . import appeal, arms, auto, mining, scoring, skills, store, trial
 from .judge import TASK as JUDGE_TASK, Judge
 from .procs import CommandError, container_binary, run
 
@@ -52,6 +52,23 @@ def setup(parser: argparse.ArgumentParser) -> None:
                         "from the daily budget instead of --budget and always quarantines a harmful skill")
 
     subs.add_parser("report", help="Latest verdict per skill and model")
+
+    ap = subs.add_parser(
+        "appeal", help="Draft a fix for a harmful skill and prove it on trial; then show, apply or undo it",
+        description="appeal <skill>: draft a fix of the latest harmful verdict and try it on the same tasks. "
+                    "appeal show|apply|undo <skill>: see the draft, write it over the skill's SKILL.md "
+                    "(granted drafts only), or put the original back.")
+    ap.add_argument("words", nargs="+", metavar="[show|apply|undo] skill")
+    ap.add_argument("--model", help="The model of the harmful verdict (default: the profile's model)")
+    ap.add_argument("--provider", help="Provider for the draft's replays")
+    ap.add_argument("--tasks", type=_positive(int), help="Try the draft on at most this many of the trial's tasks "
+                                                         "(default: all of them)")
+    ap.add_argument("--reps", type=_positive(int), default=1, help="Runs per task and arm (default 1)")
+    ap.add_argument("--parallel", type=_positive(int), default=4, help="Concurrent runs (default 4)")
+    ap.add_argument("--budget", type=_positive(float), default=3.0,
+                    help="Stop starting runs past this spend in USD (default 3)")
+    ap.add_argument("--timeout", type=_positive(float), default=900,
+                    help="Seconds per run before it is interrupted (default 900)")
 
     a = subs.add_parser("auto", help="Test skills automatically after the agent writes or changes them")
     asubs = a.add_subparsers(dest="auto_command")
@@ -272,7 +289,17 @@ def _run_auto_queue(args: argparse.Namespace, llm: Any) -> int:
 
             def close(name: str, outcome: trial.Outcome) -> None:
                 store.finish_queued(name, outcome.trial_id, outcome.score.verdict)
-                store.add_notice(outcome.trial_id, auto.notice(name, outcome))
+                proposed = None
+                # A harmful skill with a recorded cause gets a drafted fix tried on its tasks, within
+                # the same budget. It is never applied without the user.
+                if outcome.score.verdict == scoring.HURTS and outcome.cause and not budget.exhausted:
+                    try:
+                        proposed = appeal.draft_and_try(source, library[name], outcome.model, opts, budget, judge,
+                                                        print, auto=True)
+                        print(f"  appeal #{proposed['id']}: {proposed['verdict'].upper()}: {proposed['reason']}")
+                    except Exception as exc:  # the verdict's notice goes out without a fix
+                        print(f"  appeal: none tried ({type(exc).__name__}: {exc})")
+                store.add_notice(outcome.trial_id, auto.notice(name, outcome, proposed))
 
             budget = trial.Budget(left, allow_unpriced=False)
             try:
@@ -329,6 +356,70 @@ def _cmd_report() -> int:
             print(f"  {t['skill']} on {t['model']}: {t['cause']}")
             if t["cause_quote"]:
                 print(f"    skill line: {t['cause_quote']}")
+    appeals = store.latest_appeals()
+    if appeals:
+        print("\nAppeals:")
+        for a in appeals:
+            state = "applied" if a["applied_at"] else (a["verdict"] or "not decided")
+            print(f"  {a['skill']} on {a['model']}: #{a['id']} {state}: {a['reason'] or 'its trial did not finish'}")
+            if a["verdict"] == appeal.GRANTED and not a["applied_at"]:
+                print(f"    apply: hermes court appeal apply {a['skill']} --model {a['model']}")
+    return 0
+
+
+_APPEAL_ACTIONS = ("apply", "show", "undo")
+
+
+def _cmd_appeal(args: argparse.Namespace, llm: Any) -> int:
+    words = args.words
+    if len(words) == 2 and words[0] in _APPEAL_ACTIONS:
+        action, name = words
+    elif len(words) == 1:
+        action, name = "draft", words[0]
+    else:
+        print("usage: hermes court appeal [apply|show|undo] <skill>")
+        return 2
+    source = _source()
+    library = skills.library()
+    if name not in library:
+        print(f"Unknown skill: {name}")
+        return 2
+    skill = library[name]
+    model = args.model or arms.source_model(source)
+    if action == "show":
+        shown = store.latest_appeal(name, args.model)
+        if shown is None:
+            print(f"{name} has no appeal.")
+            return 1
+        state = "applied" if shown["applied_at"] else (shown["verdict"] or "not decided")
+        print(f"Appeal #{shown['id']} of {name} on {shown['model']}, drafted {_local(shown['created_at'])}: {state}"
+              f"{': ' + shown['reason'] if shown['reason'] else ''}\n\n{shown['diff']}")
+        if shown["verdict"] == appeal.GRANTED and not shown["applied_at"]:
+            print(f"Apply it: hermes court appeal apply {name} --model {shown['model']}")
+        return 0
+    if action == "apply":
+        applied = appeal.apply(skill, model)
+        print(f"Applied appeal #{applied['id']}: wrote {skill.path / 'SKILL.md'}. The original is kept in Skill Court's "
+              f"store; `hermes court appeal undo {name} --model {model}` puts it back.")
+        print(f"{name} is visible to {model} again." if name not in store.hidden_for(model)
+              else f"{name} is still hidden from {model} by a quarantine for every model.")
+        return 0
+    if action == "undo":
+        undone = appeal.undo(skill, model)
+        print(f"Restored {skill.path / 'SKILL.md'} as it was before appeal #{undone['id']}"
+              + (f"; {name} is quarantined for {model} again." if undone["lifted"] is not None else "."))
+        return 0
+
+    run([container_binary(), "version"], timeout=60)
+    opts = trial.Options(reps=args.reps, parallel=args.parallel, timeout=args.timeout, model=args.model,
+                         provider=args.provider)
+    budget = trial.Budget(args.budget, allow_unpriced=False)
+    with _trial_lock():
+        decided = appeal.draft_and_try(source, skill, model, opts, budget, Judge(llm), print, task_limit=args.tasks)
+    print(f"\nAppeal #{decided['id']}: {decided['verdict'].upper()}: {decided['reason']}.")
+    print(f"Apply it: hermes court appeal apply {name} --model {model}" if decided["verdict"] == appeal.GRANTED
+          else f"{name} stays as it is; see the draft again with: hermes court appeal show {name}")
+    print(f"Spent at least ${budget.spent:.2f} of ${budget.limit:.2f} on replays.")
     return 0
 
 
@@ -419,6 +510,8 @@ def dispatch(args: argparse.Namespace, llm: Any) -> int:
             return _cmd_tasks(args)
         if command == "auto":
             return _cmd_auto(args)
+        if command == "appeal":
+            return _cmd_appeal(args, llm)
     except CommandError as exc:
         print(f"Skill Court: {exc}")
         return 1
@@ -438,5 +531,5 @@ def dispatch(args: argparse.Namespace, llm: Any) -> int:
         rows = [[skill, model, reason, _local(since)] for skill, model, reason, since in store.quarantine_entries()]
         print(_table(rows, ["skill", "model", "reason", "since"]) if rows else "No skills are quarantined.")
         return 0
-    print("usage: hermes court {trial,report,auto,tasks,quarantine,release,list}")
+    print("usage: hermes court {trial,report,appeal,auto,tasks,quarantine,release,list}")
     return 2

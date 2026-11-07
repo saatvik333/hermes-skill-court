@@ -168,8 +168,9 @@ def _regressions(decided: dict[tuple[int, int], tuple[bool, bool]]) -> tuple[int
 
 
 def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Options, budget: Budget,
-        say: Callable[[str], None], judge: Judge, auto: bool = False) -> Outcome:
-    trial_id = store.start_trial(skill.name, skill.content_hash(), model, auto)
+        say: Callable[[str], None], judge: Judge, auto: bool = False, appeal_id: int | None = None) -> Outcome:
+    """``appeal_id``: this trial tries that appeal's draft (``skill.path`` holds the drafted skill)."""
+    trial_id = store.start_trial(skill.name, skill.content_hash(), model, auto, appeal_id)
     workdir = plugin_data_dir(store.PLUGIN) / "runs"
     workdir.mkdir(parents=True, exist_ok=True)
     by_id = {task.id: task for task in tasks}
@@ -219,13 +220,16 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
     model = observed.most_common(1)[0][0] if observed else model
 
     cause = quote = None
+    evidence: dict = {}
     lost = next((key for key, pair in decided.items() if pair == (False, True)), None)
     if score.verdict == scoring.HURTS and lost is not None:
         task, with_run, without_run = by_id[lost[0]], runs[lost]["with"], runs[lost]["without"]
         try:
             messages = runner.session_messages(arms.profiles["with"], with_run.session_id or "")
-            found = judge.explain((skill.path / "SKILL.md").read_text(encoding="utf-8"), task.prompt,
-                                  excerpt(messages, skill.name), without_run.answer or "(no final answer)")
+            evidence = {"task": task.prompt, "excerpt": excerpt(messages, skill.name),
+                        "without_answer": without_run.answer or "(no final answer)"}
+            found = judge.explain((skill.path / "SKILL.md").read_text(encoding="utf-8"), evidence["task"],
+                                  evidence["excerpt"], evidence["without_answer"])
         except Exception as exc:  # the verdict stands without a cause
             say(f"  cause: none found ({type(exc).__name__}: {exc})")
         else:
@@ -238,7 +242,7 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
     summary = {**asdict(score), "sources": dict(sources), "judge_tokens": judge_tokens}
     store.finish_trial(trial_id, model, score.verdict, json.dumps(summary))
     if cause is not None:
-        store.set_cause(trial_id, cause, quote)
+        store.set_cause(trial_id, cause, quote, evidence)
 
     quarantined = False
     if opts.apply and score.verdict == scoring.HURTS:

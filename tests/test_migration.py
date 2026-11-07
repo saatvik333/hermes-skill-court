@@ -37,7 +37,7 @@ def test_a_1_0_database_is_upgraded_in_place_with_its_data(hermes_home):
     assert (old["id"], old["verdict"], old["auto"], old["cause"]) == (3, "hurts", 0, None)
     assert [r["cost_usd"] for r in store.runs_for(3)] == [0.02]
 
-    store.set_cause(3, "It divides by 100.", "- amounts are in cents")
+    store.set_cause(3, "It divides by 100.", "- amounts are in cents", {"task": "Total the export"})
     store.record_judgment(3, {"task_id": 1, "rep": 0, "first": "without", "second": "without", "winner": "without"})
     assert store.latest_trials()[0]["cause_quote"] == "- amounts are in cents"
     assert [j["winner"] for j in store.judgments_for(3)] == ["without"]

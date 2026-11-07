@@ -2,10 +2,13 @@
 
 **Does the skill your agent wrote actually help?** Skill Court runs the same tasks twice, once with
 the skill and once without it, each run in its own Docker sandbox, and compares the results. Skills
-that make results worse for a model are hidden from that model. Their files are never edited, and
-one command brings them back. With automatic trials on, every skill the agent writes or changes is
-tried this way in the background, and the verdict, with the skill line that caused a failure, is
-posted into your next conversation.
+that make results worse for a model are hidden from that model; hiding never edits their files, and
+one command brings them back. An appeal goes one step further: it drafts a fix for the line that
+misled the model, proves the fix on the same tasks, and writes it only when you apply it. With
+automatic trials on, every skill the agent writes or changes is tried this way in the background,
+and the verdict, with the skill line that caused a failure, is posted into your next conversation.
+
+![Every lesson the agent writes goes on trial](../docs/loop.png)
 
 ![Skill Court verdicts on a demo skill library](../docs/banner.png)
 
@@ -158,12 +161,44 @@ automatic trials for that skill at once, with a notice, since the budget could n
 plugin LLM API does not price calls, so the judge's calls (two per check-less task, one for a cause)
 are reported in tokens and are not counted in the budget.
 
+## Appeals
+
+A quarantine hides a bad lesson; an appeal fixes it, with a verifier at each step:
+
+```
+hermes court appeal sales-csv-totals --model claude-sonnet-5-5     # draft a fix and try it
+hermes court appeal show sales-csv-totals                          # the diff and the verdict
+hermes court appeal apply sales-csv-totals --model claude-sonnet-5-5
+hermes court appeal undo sales-csv-totals --model claude-sonnet-5-5
+```
+
+1. **Draft.** The skill's latest verdict on that model must be `hurts`, with a recorded cause. The
+   judge (`skill_court_judge`) writes a revised `SKILL.md` from the cause, the quoted line and the
+   failed run's excerpt: the smallest edit that removes the cause, the frontmatter `name` unchanged,
+   the rule narrowed rather than the skill deleted.
+2. **Re-verify.** The draft goes on trial on the same tasks. The with-skill replay profile gets the
+   draft in place of its copy of the skill; the without-skill profile is unchanged. The appeal is
+   **granted** when the draft no longer hurts and its success with the skill beats the original's,
+   and **denied** otherwise, with the reason. The diff, the draft, its trial and the verdict are
+   stored.
+3. **Apply, only when you ask.** `appeal apply` (or **Apply fix** on the Desktop page) writes a
+   granted draft over the live `SKILL.md` in one atomic rename, only if the skill is unchanged since
+   the draft and not locked (`hermes curator lock`), and lifts the quarantine for that model. The
+   draft's trial, recorded under the draft's content hash, becomes the skill's current verdict.
+4. **Undo.** The original `SKILL.md` is kept in Skill Court's store; `appeal undo` writes it back
+   byte for byte, if the live file is still the applied draft, and restores the quarantine.
+
+After an automatic `hurts` with a cause, auto mode also drafts and tries an appeal within the same
+daily budget, and the notice says when a fix was proven. It never applies one.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `hermes court trial <skill>… \| --all` | Paired replays and a verdict per skill |
-| `hermes court report` | Latest verdict per skill and model, where its outcomes came from, whether the skill changed since, and why a harmful skill hurt |
+| `hermes court report` | Latest verdict per skill and model, where its outcomes came from, whether the skill changed since, why a harmful skill hurt, and appeals |
+| `hermes court appeal <skill> [--model M] [--tasks N] [--reps R] [--budget USD]` | Draft a fix for a harmful verdict and try it on the same tasks |
+| `hermes court appeal show\|apply\|undo <skill> [--model M]` | See the draft and its verdict; write a granted draft over `SKILL.md`; put the original back |
 | `hermes court auto on [--budget USD] [--quiet-minutes M]` | Try every skill the agent writes or changes automatically |
 | `hermes court auto off` / `status` | Stop that; show today's spend, the queue and recent notices |
 | `hermes court tasks list <skill>` | A skill's replay tasks |
@@ -173,7 +208,6 @@ are reported in tokens and are not counted in the budget.
 | `hermes court quarantine <skill> [--model M]` | Hide a skill (default: from every model) |
 | `hermes court release <skill> [--model M]` | Show it again (default: to every model) |
 | `hermes court list` | Quarantined skills |
-
 `trial` options: `--tasks 5` per skill, `--reps 1` per task and arm, `--parallel 4` concurrent runs,
 `--budget 3` (USD; no new runs start past it), `--allow-unpriced` to keep going when the provider
 reports no price, `--timeout 900` seconds per run before it is interrupted, `--model` and
@@ -192,6 +226,8 @@ The plugin adds a **Skill Court** page to Hermes Desktop and the Webapp (turn it
 different models side by side, harmful skills first, and lets you quarantine or release each one.
 Each verdict shows how many outcomes came from a check and how many from the judge, why a harmful
 skill hurt (with its `SKILL.md` line), whether the trial was automatic, and today's automatic spend.
+A skill with a granted appeal shows **Fix proposed** with the diff and an **Apply fix** button,
+which first asks you to confirm, naming the file it overwrites.
 
 ![The Skill Court page in Hermes Desktop](../docs/desktop.png)
 
@@ -258,6 +294,9 @@ hermes -p courtlab court report
   turn starts, so a session that has gone silent waits for the next turn anywhere in the profile.
 - Quarantine hides a skill from the agent's skill index and skill tools; the file stays readable to
   file tools.
+- An appeal's draft is proven on the tasks that found the harm, not on every use of the skill: a
+  draft can pass them and still be wrong elsewhere. Read the diff before you apply it; undo puts the
+  original back. A draft is tried only on a skill inside the profile's own skills directory.
 - In `codex_app_server` mode the prompt bypasses `llm_request`, so the model is never known to the
   plugin there: only quarantines set for every model apply, through the `skills_list` filter and the
   `skill_view` refusal.
@@ -288,7 +327,8 @@ hermes -p courtlab court report
 - **Sends to the judge model** (through Hermes' plugin LLM API, on your credentials): for a task
   without a check, the task text, both runs' final answers and the text of the files they left in
   their sandboxes; for a harmful verdict, the skill's `SKILL.md`, an excerpt of the failed run's
-  transcript (tool calls and results, cut short) and the other run's answer.
+  transcript (tool calls and results, cut short) and the other run's answer; for an appeal, the
+  same plus the recorded cause.
 - **What a replay profile changes from your profile:** Docker backend with one fresh container per
   run; no host directories mounted, no extra `docker run` flags, no container env, no forwarded host
   env and no `env_passthrough`; egress proxy off (its credentials belong to your profile and are not
@@ -304,8 +344,11 @@ hermes -p courtlab court report
   creates, patches or edits, and the session it happened in; `on_session_finalize` and
   `pre_llm_call` start the queue. `pre_llm_call` also posts finished verdicts with
   `ctx.post_message`; it never adds anything to the model's context.
-- **Writes:** only its own `plugin-data/skill-court/` (`data.db`, `auto.log`, run scratch files). It
-  never edits or deletes a skill.
+- **Writes:** its own `plugin-data/skill-court/` (`data.db`, `auto.log`, run scratch files), and a
+  drafted `SKILL.md` into the with-skill replay profile while an appeal is on trial. A live skill
+  file is written only by `hermes court appeal apply` (or **Apply fix**), after the draft was proven
+  on trial and only if the skill is unchanged and unlocked, and by `appeal undo`, which writes the
+  original back from the store. It never deletes a skill.
 - **No network calls of its own** and no telemetry.
 
 ## License

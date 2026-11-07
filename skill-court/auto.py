@@ -21,6 +21,7 @@ from hermes_constants import get_hermes_home, profile_name_for_home
 from plugins.plugin_storage import plugin_data_dir
 
 from . import scoring, store, trial
+from .appeal import GRANTED
 from .procs import child_env, hermes_binary
 
 # Skill lifecycle actions that change what the agent will be told (``tools/skill_usage.py``).
@@ -96,8 +97,9 @@ def _sentence(text: str) -> str:
     return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
-def notice(skill: str, outcome: trial.Outcome) -> str:
-    """What the user is told about one automatic trial."""
+def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None) -> str:
+    """What the user is told about one automatic trial; ``proposed``: the appeal tried after a
+    ``hurts`` verdict, if any."""
     score, model = outcome.score, outcome.model
     evidence = trial.describe_sources(outcome.sources)
     if score.verdict == scoring.HURTS:
@@ -110,6 +112,11 @@ def notice(skill: str, outcome: trial.Outcome) -> str:
             text += f" Skill line: \"{outcome.quote}\"." if outcome.quote else ""
         if outcome.quarantined:
             text += f" `hermes court release {skill}` undoes it."
+        if proposed is not None and proposed["verdict"] == GRANTED:
+            text += (f" A fix was proven: {_sentence(proposed['reason'])} See it with `hermes court appeal show {skill}`, "
+                     f"apply it with `hermes court appeal apply {skill}`.")
+        elif proposed is not None:
+            text += f" A drafted fix did not pass its trial: {_sentence(proposed['reason'])}"
         return text
     if score.verdict == scoring.HELPS:
         return f"Skill Court: `{skill}` helps {model}: {score.reason} ({evidence})."

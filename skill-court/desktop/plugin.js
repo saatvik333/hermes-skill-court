@@ -1,8 +1,10 @@
-// Skill Court page for Hermes Desktop: the latest verdict per skill and model, and the quarantine
-// switch. Data comes from this plugin's backend (dashboard/plugin_api.py) through ctx.rest.
+// Skill Court page for Hermes Desktop: the latest verdict per skill and model, the quarantine
+// switch, and fixes proposed by appeals. Data comes from this plugin's backend
+// (dashboard/plugin_api.py) through ctx.rest.
 import {
   Badge,
   Button,
+  ConfirmDialog,
   EmptyState,
   ErrorState,
   Loader,
@@ -107,6 +109,60 @@ function Cause({ row }) {
   })
 }
 
+// A fix an appeal drafted and tried. Only a granted draft of the skill as it is can be applied; the
+// dialog says which file is overwritten and where the old text stays.
+function AppealCell({ row, applyFix }) {
+  const [open, setOpen] = useState(false)
+  const appeal = row.appeal
+  if (!appeal) {
+    return null
+  }
+  const note = text => jsx('p', { className: 'max-w-80 text-[0.6875rem] text-(--ui-text-secondary)', children: text })
+  if (appeal.applied) {
+    return note(`Fix applied (appeal #${appeal.id}). Undo: hermes court appeal undo ${row.skill}`)
+  }
+  if (appeal.verdict !== 'granted') {
+    return note(appeal.verdict ? `Fix denied: ${appeal.reason}` : 'A drafted fix is still on trial.')
+  }
+  if (appeal.stale) {
+    return note('A fix was proven for an earlier version of this skill; draft a new appeal.')
+  }
+  return jsxs('div', {
+    className: 'flex max-w-80 flex-col items-start gap-1 text-[0.6875rem]',
+    children: [
+      jsx(Badge, { variant: 'success', children: 'Fix proposed' }),
+      jsx('p', { className: 'text-(--ui-text-secondary)', children: appeal.reason }),
+      jsxs('details', {
+        children: [
+          jsx('summary', { className: 'cursor-pointer text-(--ui-text-secondary)', children: 'Show the change' }),
+          jsx('pre', {
+            className: 'mt-1 max-h-64 overflow-auto rounded border border-(--ui-stroke-secondary) p-2 font-mono',
+            children: appeal.diff
+          })
+        ]
+      }),
+      jsx(Button, {
+        'aria-label': `Apply fix to ${row.skill}: overwrite its SKILL.md with the draft that passed its trial`,
+        onClick: () => setOpen(true),
+        size: 'sm',
+        variant: 'secondary',
+        children: 'Apply fix'
+      }),
+      jsx(ConfirmDialog, {
+        busyLabel: 'Applying…',
+        confirmLabel: 'Apply fix',
+        description: `This overwrites ${appeal.path} with the draft from appeal #${appeal.id}. The current text is kept in Skill Court's store; \`hermes court appeal undo ${row.skill}\` puts it back. The quarantine for ${row.model} is lifted.`,
+        destructive: true,
+        doneLabel: 'Applied',
+        onClose: () => setOpen(false),
+        onConfirm: () => applyFix(row),
+        open,
+        title: `Apply the fix to ${row.skill}?`
+      })
+    ]
+  })
+}
+
 function ActionCell({ row, act, pending, error }) {
   const hidden = row.quarantined
   if (!hidden && row.verdict !== 'hurts') {
@@ -137,7 +193,7 @@ function ActionCell({ row, act, pending, error }) {
   })
 }
 
-function VerdictRow({ row, act, pending, error }) {
+function VerdictRow({ row, act, applyFix, pending, error }) {
   return jsxs('tr', {
     className: 'border-t border-(--ui-stroke-secondary) align-top',
     children: [
@@ -167,6 +223,7 @@ function VerdictRow({ row, act, pending, error }) {
               ? jsx('span', { className: 'max-w-72 text-[0.6875rem] text-(--ui-text-tertiary)', children: row.reason })
               : null,
             jsx(Cause, { row }),
+            jsx(AppealCell, { applyFix, row }),
             row.quarantined
               ? jsx('span', {
                   className: 'text-[0.6875rem] text-(--ui-text-secondary)',
@@ -323,6 +380,21 @@ function SkillCourtPage({ rest, source }) {
     }
   }
 
+  // Runs inside the confirmation dialog: a failure throws, and the dialog shows it beside its buttons.
+  const applyFix = async row => {
+    try {
+      await rest('/appeal/apply', { method: 'POST', body: { skill: row.skill, model: row.model } })
+      setAnnouncement(`${row.skill}: fix applied. ${row.appeal.path} was overwritten; the old text is kept by Skill Court.`)
+    } finally {
+      await queryClient.invalidateQueries({ queryKey })
+      requestAnimationFrame(() => {
+        if (!document.activeElement || document.activeElement === document.body) {
+          headingRef.current?.focus()
+        }
+      })
+    }
+  }
+
   const refresh = async () => {
     if (query.isFetching) {
       return
@@ -345,7 +417,7 @@ function SkillCourtPage({ rest, source }) {
       children: jsx(Button, { onClick: () => query.refetch(), size: 'sm', variant: 'outline', children: 'Try again' })
     })
   } else {
-    const { verdicts, quarantine, auto } = query.data
+    const { verdicts, quarantine, auto, appeals } = query.data
     const hiddenBy = v =>
       quarantine.filter(q => q.skill === v.skill && (q.model === v.model || q.model === ANY_MODEL)).map(q => q.model)
     const shown = new Set(verdicts.flatMap(v => hiddenBy(v).map(m => `${v.skill}\u0000${m}`)))
@@ -364,7 +436,11 @@ function SkillCourtPage({ rest, source }) {
           (VERDICT_ORDER[a.verdict] ?? 9) - (VERDICT_ORDER[b.verdict] ?? 9) ||
           a.model.localeCompare(b.model)
       )
-      .map(v => ({ ...v, hiddenBy: hiddenBy(v) }))
+      .map(v => ({
+        ...v,
+        hiddenBy: hiddenBy(v),
+        appeal: (appeals ?? []).find(a => a.skill === v.skill && a.model === v.model)
+      }))
     body = verdicts.length
       ? jsxs('div', {
           className: 'flex flex-col gap-6',
@@ -397,7 +473,11 @@ function SkillCourtPage({ rest, source }) {
                   jsx('tbody', {
                     children: rows.map(row => {
                       const key = `${row.skill}\u0000${row.model}`
-                      return jsx(VerdictRow, { act, error: errors[key], pending: pendingKey === key, row }, key)
+                      return jsx(
+                        VerdictRow,
+                        { act, applyFix, error: errors[key], pending: pendingKey === key, row },
+                        key
+                      )
                     })
                   })
                 ]

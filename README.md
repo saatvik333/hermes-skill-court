@@ -4,7 +4,10 @@ A Hermes Agent plugin that tests whether the skills your agent wrote actually he
 tasks with and without each skill in Docker sandboxes, scores the difference per model (a sandbox
 check, or a blind pairwise judge for tasks without one), and hides harmful skills from the models
 they hurt without editing their files. With automatic trials on, it does this in the background after
-the agent writes a skill, and tells you the verdict and the skill line behind a failure.
+the agent writes a skill, and tells you the verdict and the skill line behind a failure. An appeal
+drafts a fix for that line and proves it on the same tasks; the fix is written only when you apply it.
+
+![Every lesson the agent writes goes on trial](docs/loop.png)
 
 ![Skill Court verdicts on a demo skill library](docs/banner.png)
 

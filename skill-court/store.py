@@ -7,6 +7,7 @@ each step in ``_MIGRATIONS`` upgrades one version and keeps the data already sto
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -111,6 +112,34 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
             text         TEXT NOT NULL,
             created_at   TEXT NOT NULL,
             delivered_at TEXT
+        )""",
+    ),
+    # 3: appeals: a drafted fix of a harmful skill, its own trial, and what applying it changed.
+    (
+        # The task, the failed run's excerpt and the other run's answer behind a cause, as JSON.
+        "ALTER TABLE trials ADD COLUMN evidence TEXT",
+        # Set on the trial of an appeal's draft; such a trial is the skill's current verdict only
+        # while the draft is applied.
+        "ALTER TABLE trials ADD COLUMN appeal_id INTEGER",
+        # ``original``: SKILL.md's bytes when drafted, which undo writes back; ``base_hash`` and
+        # ``draft_hash``: the skill's content hash before and with the draft; ``trial_id``: the
+        # draft's trial; ``lifted``: the quarantine reason that applying the draft removed.
+        """CREATE TABLE appeals (
+            id                INTEGER PRIMARY KEY,
+            skill             TEXT NOT NULL,
+            model             TEXT NOT NULL,
+            appealed_trial_id INTEGER REFERENCES trials (id) ON DELETE SET NULL,
+            base_hash         TEXT NOT NULL,
+            original          BLOB NOT NULL,
+            draft             TEXT NOT NULL,
+            draft_hash        TEXT NOT NULL,
+            diff              TEXT NOT NULL,
+            created_at        TEXT NOT NULL,
+            trial_id          INTEGER REFERENCES trials (id) ON DELETE SET NULL,
+            verdict           TEXT CHECK (verdict IN ('granted', 'denied')),
+            reason            TEXT,
+            applied_at        TEXT,
+            lifted            TEXT
         )""",
     ),
 )
@@ -227,11 +256,11 @@ def remove_task(task_id: int) -> bool:
 
 # --- trials and runs --------------------------------------------------------------------------
 
-def start_trial(skill: str, skill_hash: str, model: str, auto: bool = False) -> int:
+def start_trial(skill: str, skill_hash: str, model: str, auto: bool = False, appeal_id: int | None = None) -> int:
     with closing(_connect()) as conn, conn:
         cur = conn.execute(
-            "INSERT INTO trials (skill, skill_hash, model, started_at, auto) VALUES (?, ?, ?, ?, ?)",
-            (skill, skill_hash, model, _now(), int(auto)),
+            "INSERT INTO trials (skill, skill_hash, model, started_at, auto, appeal_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (skill, skill_hash, model, _now(), int(auto), appeal_id),
         )
         return int(cur.lastrowid)
 
@@ -244,10 +273,12 @@ def finish_trial(trial_id: int, model: str, verdict: str, summary: str) -> None:
         )
 
 
-def set_cause(trial_id: int, cause: str, quote: str | None) -> None:
-    """Why a harmful verdict happened; ``quote`` is a line of the skill's SKILL.md, verified to occur there."""
+def set_cause(trial_id: int, cause: str, quote: str | None, evidence: dict) -> None:
+    """Why a harmful verdict happened; ``quote`` is a line of the skill's SKILL.md, verified to occur
+    there; ``evidence`` is what the cause was read from (task, failed run's excerpt, other answer)."""
     with closing(_connect()) as conn, conn:
-        conn.execute("UPDATE trials SET cause = ?, cause_quote = ? WHERE id = ?", (cause, quote, trial_id))
+        conn.execute("UPDATE trials SET cause = ?, cause_quote = ?, evidence = ? WHERE id = ?",
+                     (cause, quote, json.dumps(evidence), trial_id))
 
 
 RUN_FIELDS = ("task_id", "arm", "rep", "session_id", "model", "exit_code", "completed", "passed",
@@ -288,16 +319,64 @@ def judgments_for(trial_id: int) -> list[dict]:
 
 
 def latest_trials(skills: Iterable[str] | None = None) -> list[dict]:
-    """The newest finished trial per (skill, model)."""
+    """The newest finished trial per (skill, model). A draft's trial counts only while that draft is
+    the applied skill."""
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT t.* FROM trials t WHERE t.finished_at IS NOT NULL AND t.id = ("
-            " SELECT MAX(id) FROM trials u WHERE u.skill = t.skill AND u.model = t.model"
-            " AND u.finished_at IS NOT NULL) ORDER BY t.skill, t.model"
+            "SELECT t.* FROM trials t WHERE t.id = (SELECT MAX(u.id) FROM trials u"
+            " WHERE u.skill = t.skill AND u.model = t.model AND u.finished_at IS NOT NULL"
+            " AND (u.appeal_id IS NULL OR u.appeal_id IN (SELECT id FROM appeals WHERE applied_at IS NOT NULL)))"
+            " ORDER BY t.skill, t.model"
         ).fetchall()
     wanted = set(skills) if skills is not None else None
     return [dict(r) for r in rows if wanted is None or r["skill"] in wanted]
+
+
+# --- appeals ----------------------------------------------------------------------------------
+
+def add_appeal(skill: str, model: str, appealed_trial_id: int, base_hash: str, original: bytes,
+               draft: str, draft_hash: str, diff: str) -> int:
+    with closing(_connect()) as conn, conn:
+        return int(conn.execute(
+            "INSERT INTO appeals (skill, model, appealed_trial_id, base_hash, original, draft, draft_hash, diff,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (skill, model, appealed_trial_id, base_hash, original, draft, draft_hash, diff, _now()),
+        ).lastrowid)
+
+
+def decide_appeal(appeal_id: int, trial_id: int, verdict: str, reason: str) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE appeals SET trial_id = ?, verdict = ?, reason = ? WHERE id = ?",
+                     (trial_id, verdict, reason, appeal_id))
+
+
+def latest_appeal(skill: str, model: str | None = None) -> dict | None:
+    """The newest appeal of ``skill`` (for ``model``, when given)."""
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM appeals WHERE skill = ? AND (? IS NULL OR model = ?) ORDER BY id DESC LIMIT 1",
+            (skill, model, model),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_appeals() -> list[dict]:
+    """The newest appeal per (skill, model)."""
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT a.* FROM appeals a WHERE a.id = (SELECT MAX(id) FROM appeals b"
+            " WHERE b.skill = a.skill AND b.model = a.model) ORDER BY a.skill, a.model")]
+
+
+def set_applied(appeal_id: int, applied: bool, lifted: str | None = None) -> None:
+    """Record that the draft was written to the live skill (``lifted``: the quarantine reason that
+    applying it removed), or that undo put the original back."""
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE appeals SET applied_at = ?, lifted = ? WHERE id = ?",
+                     (_now() if applied else None, lifted, appeal_id))
 
 
 # --- automatic trials -------------------------------------------------------------------------
