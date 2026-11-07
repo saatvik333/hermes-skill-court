@@ -98,15 +98,18 @@ def workspace_text(archive_b64: str, limit: int = SNAPSHOT_CHARS) -> str:
 
 def snapshot_script(minutes: int) -> str:
     """The shell script that prints, base64-encoded, a tar of the files the run created or changed.
-    The archive goes to a temporary file first, so tar's own exit status is the script's."""
+    The archive goes to a temporary file first, so tar's own exit status is the script's. GNU tar
+    exits 1 when a file changed as it was read, with the archive still written; only 2 and above
+    fail the snapshot."""
     roots = " ".join(SNAPSHOT_ROOTS)
     return ("for tool in tar base64 mktemp; do\n"
             "  command -v \"$tool\" >/dev/null || { echo \"$tool is missing\" >&2; exit 127; }\n"
             "done\n"
             "archive=$(mktemp) || exit 1\n"
             f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
-            f" | head -n {SNAPSHOT_FILES} | tar -cf \"$archive\" -T - && base64 \"$archive\"\n"
+            f" | head -n {SNAPSHOT_FILES} | tar -cf \"$archive\" -T -\n"
             "status=$?\n"
+            "if [ \"$status\" -le 1 ]; then base64 \"$archive\"; status=$?; fi\n"
             "rm -f \"$archive\"\n"
             "exit $status\n")
 

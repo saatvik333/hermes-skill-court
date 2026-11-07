@@ -56,6 +56,10 @@ class SkillModelBody(BaseModel):
     model: str
 
 
+class ApplyBody(SkillModelBody):
+    appeal_id: int  # the appeal the page's dialog showed; nothing else is applied
+
+
 def _appeals(library: dict) -> list[dict]:
     """The newest appeal per skill and model: its draft's diff, verdict, and whether it still
     applies to the skill as it is (``stale`` once the skill changed after the draft)."""
@@ -132,15 +136,16 @@ async def appeal(skill: str, model: str) -> dict:
     return found
 
 
-def _apply(body: SkillModelBody) -> dict:
+def _apply(body: ApplyBody) -> dict:
     # The same command a terminal runs, so its checks (granted, unchanged since the draft, not
     # locked, a loadable draft that passes Hermes' security scan) and its atomic write live in one
-    # place. The page asked the user to confirm already, hence --yes.
+    # place. The page asked the user to confirm already, hence --yes; --appeal refuses any appeal
+    # but the one the dialog named.
     profile = profile_name_for_home(get_hermes_home())
     if profile is None:
         raise HTTPException(status_code=409, detail="Skill Court needs a Hermes profile home")
     proc = procs.run([procs.hermes_binary(), "-p", profile, "court", "appeal", "apply", body.skill, "--model", body.model,
-                      "--yes"], timeout=120, check=False)
+                      "--appeal", str(body.appeal_id), "--yes"], timeout=120, check=False)
     message = " ".join((proc.stdout or proc.stderr).split())
     if proc.returncode != 0:
         raise HTTPException(status_code=409, detail=message.removeprefix("Skill Court: "))
@@ -148,5 +153,5 @@ def _apply(body: SkillModelBody) -> dict:
 
 
 @router.post("/appeal/apply")
-async def apply_appeal(body: SkillModelBody) -> dict:
+async def apply_appeal(body: ApplyBody) -> dict:
     return await asyncio.to_thread(_apply, body)

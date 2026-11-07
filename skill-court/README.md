@@ -104,9 +104,10 @@ runs. So a pair without a check is judged by a model:
   or changed under `/workspace` and `/root` in its sandbox (captured before the sandbox is removed:
   at most 40 files of 64 KB, 16,000 characters in all, hidden directories skipped, binary files
   listed by name). The runs are labelled A and B; the judge is never told a skill exists. A run
-  whose files could not be read (the `docker exec` or `tar` failed, it timed out, or the archive
-  does not read back) has no outcome, so the pair is not judged, rather than being compared as a
-  run that left no files.
+  whose files could not be read (the `docker exec` failed, `tar` exited 2 or higher, it timed out,
+  or the archive does not read back) has no outcome, so the pair is not judged, rather than being
+  compared as a run that left no files. GNU tar's exit 1 (a file changed while it was read) still
+  writes the archive and counts as read.
 - **Both orders.** Each pair is judged twice, with the runs swapped. A run wins only when both
   orders pick it; a disagreement, which is the judge favouring a position, is a tie. The winner
   counts as a success and the loser as a failure; a tie is a success for both, so only agreed wins
@@ -210,7 +211,8 @@ hermes court appeal undo sales-csv-totals --model claude-sonnet-5-5
    a closed frontmatter with the original's top-level `name` and a description, a body, and at most
    twice the original's length (100,000 characters at most), and the skill directory with the draft
    must pass Hermes' skill security scan (`tools.skills_guard`, under its policy for agent-written
-   skills). Otherwise nothing is tried.
+   skills). Otherwise nothing is tried. If this Hermes version lacks that parser or scanner, the
+   draft is refused and nothing is tried or written.
 3. **Re-verify.** The draft goes on trial on the same tasks. The with-skill replay profile gets a
    real copy of the skill directory with the draft as its `SKILL.md`, replacing the clone's copy
    (which can be a symbolic link to your live skill, never written through); the without-skill
@@ -218,19 +220,21 @@ hermes court appeal undo sales-csv-totals --model claude-sonnet-5-5
    with the skill beats the original's, and **denied** otherwise, with the reason. The diff, the
    draft, its trial and the verdict are stored.
 4. **Apply, only when you ask.** `appeal apply` shows the diff and asks before writing (in a
-   terminal; a script passes `--yes`, and **Apply fix** on the Desktop page asks in a dialog). It
-   writes a granted draft over the live `SKILL.md` in one atomic rename, only if the live file holds
-   exactly the bytes the draft was made from, the skill is not locked (`hermes curator lock`), and
-   the draft passes the checks and the security scan again; then it lifts the quarantine for that
-   model. The draft's trial, recorded under the draft's content hash, becomes the skill's current
-   verdict. If the skill changes while the fix is written, the original is put back only over Skill
-   Court's own write, never over someone else's edit.
+   terminal; a script passes `--yes`, and **Apply fix** on the Desktop page asks in a dialog). With
+   `--appeal ID` (which the Desktop page always sends, for the appeal its dialog showed) it writes
+   only that appeal, and refuses if a newer one has replaced it. It writes a granted draft over the
+   live `SKILL.md` in one atomic rename, only if the live file holds exactly the bytes the draft was
+   made from, the skill is not locked (`hermes curator lock`), and the draft passes the checks and
+   the security scan again; then it lifts the quarantine for that model. The draft's trial, recorded
+   under the draft's content hash, becomes the skill's current verdict. If the skill changes while
+   the fix is written, the original is put back only over Skill Court's own write, never over
+   someone else's edit.
 5. **Undo.** The original `SKILL.md` is kept in Skill Court's store; `appeal undo` writes it back
    byte for byte over the latest applied draft, if the live file still holds exactly that draft, and
    restores the quarantine. Apply and undo run one at a time per profile (a lock in Skill Court's
-   plugin data), and neither writes through a `SKILL.md` that is a symbolic link: it may be shared
-   with other files or skills, so Skill Court refuses and you apply the shown diff to the linked file
-   yourself.
+   plugin data). Both refuse when the skill's directory or its `SKILL.md` is a symbolic link, since
+   the link's target may be shared with other files or skills; apply the diff `appeal show` prints
+   to the linked file yourself.
 
 After an automatic `hurts` with a cause, auto mode also drafts and tries an appeal within the same
 daily budget and judge tokens, and the notice says when a fix was proven. It never applies one.
@@ -242,7 +246,7 @@ daily budget and judge tokens, and the notice says when a fix was proven. It nev
 | `hermes court trial <skill>… \| --all` | Paired replays and a verdict per skill |
 | `hermes court report` | Latest verdict per skill and model, where its outcomes came from, whether the skill changed since, why a harmful skill hurt, and appeals |
 | `hermes court appeal <skill> [--model M] [--tasks N] [--reps R] [--budget USD]` | Draft a fix for a harmful verdict and try it on the same tasks |
-| `hermes court appeal show\|apply\|undo <skill> [--model M] [--yes]` | See the draft and its verdict; write a granted draft over `SKILL.md` (asking first unless `--yes`); put the original back |
+| `hermes court appeal show\|apply\|undo <skill> [--model M] [--yes] [--appeal ID]` | See the draft and its verdict; write a granted draft over `SKILL.md` (asking first unless `--yes`; with `--appeal`, only that appeal); put the original back |
 | `hermes court auto on [--budget USD] [--quiet-minutes M] [--judge-tokens N]` | Try every skill the agent writes or changes automatically |
 | `hermes court auto off` / `status` | Stop that; show today's spend and judge tokens, and the 20 latest queued changes and notices |
 | `hermes court tasks list <skill>` | A skill's replay tasks |
@@ -272,7 +276,8 @@ Each verdict shows how many outcomes came from a check and how many from the jud
 skill hurt (with its `SKILL.md` line), whether the trial was automatic, and today's automatic spend
 and judge tokens.
 A skill with a granted appeal shows **Fix proposed** with the diff and an **Apply fix** button,
-which first asks you to confirm, naming the file it overwrites.
+which first asks you to confirm, naming the file it overwrites, and then applies only the appeal
+that dialog showed.
 
 ![The Skill Court page in Hermes Desktop](../docs/desktop.png)
 
@@ -416,7 +421,7 @@ hermes -p courtlab court report
   written only by `hermes court appeal apply` (or **Apply fix**), after the draft was proven on
   trial and only if the live file is exactly what the draft was made from and the skill is
   unlocked, and by `appeal undo`, which writes the original back from the store. It never deletes a
-  skill and never writes through a symbolic link.
+  skill, and refuses to write when the skill's directory or its `SKILL.md` is a symbolic link.
 - **No network calls of its own** and no telemetry.
 
 ## License

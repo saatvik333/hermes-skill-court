@@ -2,6 +2,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import shutil
 import sys
 import threading
 import types
@@ -197,6 +198,37 @@ def test_a_symlinked_skill_md_is_never_written_through(skill, tmp_path):
     assert (skill.path / "SKILL.md").is_symlink() and shared.read_bytes() == ORIGINAL
 
 
+def test_a_symlinked_skill_directory_is_never_written_through(skill, tmp_path):
+    shared = tmp_path / "dotfiles" / "csv-totals"
+    shutil.copytree(skill.path, shared)
+    shutil.rmtree(skill.path)
+    skill.path.symlink_to(shared)
+    drafted_appeal(skill)
+    with pytest.raises(CommandError, match="csv-totals is a symbolic link"):
+        appeal.apply(skill, MODEL)
+    assert skill.path.is_symlink() and (shared / "SKILL.md").read_bytes() == ORIGINAL
+
+
+def _scanner_with_another_signature() -> types.ModuleType:
+    module = types.ModuleType("tools.skills_guard")
+    module.scan_skill = lambda skill_path: None  # no ``source``: a TypeError when called
+    module.should_allow_install = module.format_scan_report = _guard.should_allow_install
+    return module
+
+
+@pytest.mark.parametrize("name, replacement, missing", [
+    ("agent.skill_utils", types.ModuleType("agent.skill_utils"), "skill parser"),
+    ("tools.skills_guard", _scanner_with_another_signature(), "skill security scanner"),
+])
+def test_apply_refuses_when_hermes_lacks_its_skill_parser_or_scanner(skill, monkeypatch, name, replacement, missing):
+    drafted_appeal(skill)
+    monkeypatch.setitem(sys.modules, name, replacement)
+    with pytest.raises(CommandError, match=f"{missing} .* is unavailable on this Hermes version.*nothing was written"):
+        appeal.apply(skill, MODEL)
+    assert (skill.path / "SKILL.md").read_bytes() == ORIGINAL
+    assert store.latest_appeal(skill.name)["applied_at"] is None
+
+
 def test_apply_and_undo_wait_for_the_appeal_lock(skill, hermes_home):
     drafted_appeal(skill)
     lock = hermes_home / "plugin-data" / store.PLUGIN / appeal.APPEAL_LOCK
@@ -263,6 +295,24 @@ def test_apply_shows_the_diff_and_asks_first_on_a_terminal(skill, monkeypatch, c
     assert (skill.path / "SKILL.md").read_text() == DRAFT
     appeal.undo(skill, MODEL)
     assert apply("--yes", terminal=False) == 0
+    assert (skill.path / "SKILL.md").read_text() == DRAFT
+
+
+def test_apply_writes_only_the_appeal_that_was_shown(skill, monkeypatch, capsys):
+    shown = drafted_appeal(skill)
+    latest = drafted_appeal(skill)  # drafted again after the page or terminal showed the first
+    monkeypatch.setattr(cli.skills, "library", lambda: {skill.name: skill})
+    parser = argparse.ArgumentParser()
+    cli.setup(parser)
+
+    def apply(appeal_id):
+        return cli.dispatch(parser.parse_args(["appeal", "apply", skill.name, "--model", MODEL, "--appeal",
+                                               str(appeal_id), "--yes"]), None)
+
+    assert apply(shown) == 1
+    assert f"appeal #{shown} is not the latest" in capsys.readouterr().out
+    assert (skill.path / "SKILL.md").read_bytes() == ORIGINAL
+    assert apply(latest) == 0
     assert (skill.path / "SKILL.md").read_text() == DRAFT
 
 

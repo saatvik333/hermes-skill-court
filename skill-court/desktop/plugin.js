@@ -386,7 +386,10 @@ function SkillCourtPage({ rest, source }) {
   // Runs inside the confirmation dialog: a failure throws, and the dialog shows it beside its buttons.
   const applyFix = async row => {
     try {
-      await rest('/appeal/apply', { method: 'POST', body: { skill: row.skill, model: row.model } })
+      await rest('/appeal/apply', {
+        method: 'POST',
+        body: { skill: row.skill, model: row.model, appeal_id: row.appeal.id }
+      })
       setAnnouncement(`${row.skill}: fix applied. ${row.appeal.path} was overwritten; the old text is kept by Skill Court.`)
     } finally {
       await queryClient.invalidateQueries({ queryKey })

@@ -39,13 +39,22 @@ MAX_DRAFT_CHARS = 100_000
 APPEAL_LOCK = "appeal.lock"
 
 
+# What a Hermes without the private helpers below raises: a missing module or name, or a changed
+# signature or result. Each becomes a refusal before anything is written or tried.
+_UNAVAILABLE = (ImportError, AttributeError, TypeError)
+
+
 def _skill_file(text: str) -> tuple[dict[str, Any], str, bool]:
     """``(frontmatter, body, closed)`` of a SKILL.md as Hermes reads it: ``parse_frontmatter`` takes
     the YAML, or ``key: value`` lines when the YAML does not parse (a repeated key, for one), where
     the last ``name`` wins."""
-    from agent.skill_utils import parse_frontmatter
+    try:
+        from agent.skill_utils import parse_frontmatter
 
-    frontmatter, body = parse_frontmatter(text)
+        frontmatter, body = parse_frontmatter(text)
+    except _UNAVAILABLE as exc:
+        raise CommandError(f"Hermes' skill parser (agent.skill_utils.parse_frontmatter) is unavailable on this "
+                           f"Hermes version ({type(exc).__name__}: {exc})") from None
     # Without a closing ``---`` line Hermes reads no frontmatter and returns the whole text as the body.
     return frontmatter, body, body != text.removeprefix("\ufeff")
 
@@ -78,11 +87,16 @@ def check_draft(original: str, draft: str) -> str:
 def scan_refusal(skill_dir: Path) -> str | None:
     """Hermes' skill security scan of ``skill_dir`` under its policy for agent-written skills: the
     scan report when that policy would not let the skill in without asking, else None."""
-    from tools.skills_guard import format_scan_report, scan_skill, should_allow_install
+    try:
+        from tools.skills_guard import format_scan_report, scan_skill, should_allow_install
 
-    result = scan_skill(skill_dir, source="agent-created")
-    allowed, _reason = should_allow_install(result)
-    return None if allowed is True else format_scan_report(result)
+        result = scan_skill(skill_dir, source="agent-created")
+        allowed, _reason = should_allow_install(result)
+        return None if allowed is True else format_scan_report(result)
+    except _UNAVAILABLE as exc:
+        raise CommandError(f"Hermes' skill security scanner (tools.skills_guard) is unavailable on this Hermes "
+                           f"version ({type(exc).__name__}: {exc}); the draft could not be scanned, so nothing "
+                           "was written or tried") from None
 
 
 def diff(name: str, original: str, draft: str) -> str:
@@ -231,13 +245,14 @@ def _appeal_lock() -> Iterator[None]:
 
 
 def _skill_md(skill: Skill, model: str) -> Path:
-    """The live SKILL.md; refused when it is a symbolic link, whose target may be shared with other
-    files or skills and is not Skill Court's to overwrite."""
+    """The live SKILL.md; refused when it or the skill's directory is a symbolic link, whose target
+    may be shared with other files or skills and is not Skill Court's to overwrite."""
     path = skill.path / "SKILL.md"
-    if path.is_symlink():
-        raise CommandError(f"{path} is a symbolic link to {os.readlink(path)}; Skill Court does not write through "
-                           f"links. Apply the change shown by `hermes court appeal show {skill.name} --model {model}` "
-                           "to the linked file yourself")
+    for link in (skill.path, path):
+        if link.is_symlink():
+            raise CommandError(f"{link} is a symbolic link to {os.readlink(link)}; Skill Court does not write through "
+                               f"links. Apply the change shown by `hermes court appeal show {skill.name} --model "
+                               f"{model}` to the linked file yourself")
     return path
 
 
@@ -253,12 +268,16 @@ def _replace_if(path: Path, expected: bytes, data: bytes) -> bool:
     return True
 
 
-def granted(skill: Skill, model: str) -> dict:
-    """The granted, unapplied appeal ``apply`` writes for ``skill`` on ``model``; raises when there is none."""
+def granted(skill: Skill, model: str, appeal_id: int | None = None) -> dict:
+    """The granted, unapplied appeal ``apply`` writes for ``skill`` on ``model``; raises when there is
+    none, or when it is not ``appeal_id`` (the one the user was shown) when that is given."""
     appeal = store.latest_appeal(skill.name, model)
     if appeal is None:
         raise CommandError(f"{skill.name} has no appeal on {model}; draft one with `hermes court appeal {skill.name} "
                            f"--model {model}`")
+    if appeal_id is not None and appeal["id"] != appeal_id:
+        raise CommandError(f"appeal #{appeal_id} is not the latest appeal of {skill.name} on {model} (#{appeal['id']} "
+                           "is); nothing was written")
     if appeal["applied_at"]:
         raise CommandError(f"the fix from appeal #{appeal['id']} is already applied")
     if appeal["verdict"] != GRANTED:
@@ -269,12 +288,9 @@ def granted(skill: Skill, model: str) -> dict:
 
 def apply(skill: Skill, model: str, appeal_id: int | None = None) -> dict:
     """Write the granted draft over the live SKILL.md and lift the quarantine for ``model``.
-    ``appeal_id``: the appeal the user was shown, refused if a newer one has replaced it since."""
+    ``appeal_id``: the appeal the user was shown; refused when another one is the latest."""
     with _appeal_lock():
-        appeal = granted(skill, model)
-        if appeal_id is not None and appeal["id"] != appeal_id:
-            raise CommandError(f"appeal #{appeal['id']} replaced appeal #{appeal_id} since it was shown; nothing was "
-                               "written")
+        appeal = granted(skill, model, appeal_id)
         if skill.locked:
             raise CommandError(f"{skill.name} is locked (`hermes curator lock`); unlock it to apply the fix")
         path = _skill_md(skill, model)

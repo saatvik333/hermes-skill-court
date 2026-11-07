@@ -76,6 +76,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
                     help="Seconds per run before it is interrupted (default 900)")
     ap.add_argument("--yes", action="store_true",
                     help="appeal apply: write the fix without showing it and asking first (for scripts)")
+    ap.add_argument("--appeal", type=int, metavar="ID",
+                    help="appeal apply: write only this appeal's fix, refused when it is no longer the latest")
 
     a = subs.add_parser("auto", help="Test skills automatically after the agent writes or changes them")
     asubs = a.add_subparsers(dest="auto_command")
@@ -444,7 +446,7 @@ def _cmd_appeal(args: argparse.Namespace, llm: Any) -> int:
             print(f"Undo it: hermes court appeal undo {name} --model {shown['model']}")
         return 0
     if action == "apply":
-        pending = appeal.granted(skill, model)
+        pending = appeal.granted(skill, model, args.appeal)
         if not args.yes:
             if not sys.stdin.isatty():
                 print(f"Nothing was written: pass --yes to apply appeal #{pending['id']} without being asked.")
