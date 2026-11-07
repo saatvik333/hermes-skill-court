@@ -22,7 +22,7 @@ from .skills import Skill
 
 @dataclass(frozen=True)
 class Options:
-    tasks: int = 5
+    tasks: int = 6
     reps: int = 1
     parallel: int = 4
     timeout: float = 900

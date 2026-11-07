@@ -234,7 +234,7 @@ daily budget and judge tokens, and the notice says when a fix was proven. It nev
 | `hermes court quarantine <skill> [--model M]` | Hide a skill (default: from every model) |
 | `hermes court release <skill> [--model M]` | Show it again (default: to every model) |
 | `hermes court list` | Quarantined skills |
-`trial` options: `--tasks 5` per skill, `--reps 1` per task and arm, `--parallel 4` concurrent runs,
+`trial` options: `--tasks 6` per skill, `--reps 1` per task and arm, `--parallel 4` concurrent runs,
 `--budget 3` (USD; no new runs start past it), `--allow-unpriced` to keep going when the provider
 reports no price, `--timeout 900` seconds per run before it is interrupted, `--model` and
 `--provider` for the replays, `--apply` to quarantine harmful skills, `--keep-sandboxes` to keep the

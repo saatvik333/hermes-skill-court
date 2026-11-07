@@ -37,7 +37,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     t = subs.add_parser("trial", help="Replay tasks with and without skills and judge each skill")
     t.add_argument("skills", nargs="*", help="Skill names to try")
     t.add_argument("--all", action="store_true", help="Every skill the agent wrote")
-    t.add_argument("--tasks", type=_positive(int), default=5, help="Tasks per skill (default 5)")
+    t.add_argument("--tasks", type=_positive(int), default=6, help="Tasks per skill (default 6)")
     t.add_argument("--reps", type=_positive(int), default=1, help="Runs per task and arm (default 1)")
     t.add_argument("--parallel", type=_positive(int), default=4, help="Concurrent runs (default 4)")
     t.add_argument("--budget", type=_positive(float), default=3.0,
