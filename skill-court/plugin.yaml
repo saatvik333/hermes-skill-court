@@ -1,9 +1,10 @@
 name: skill-court
-version: 1.0.1
+version: 1.1.0
 description: >-
   Measures whether each agent-written skill actually helps: replays real tasks with and
-  without the skill, scores the difference, and quarantines skills that make results worse
-  for a given model, without editing the skill's files.
+  without the skill, scores the difference (a sandbox check, or a blind pairwise judge when a
+  task has none), and quarantines skills that make results worse for a given model, without
+  editing the skill's files. Optionally tests each skill automatically after the agent writes it.
 author: saatvik333
 license: MIT
 requires_hermes: ">=0.23.0"
@@ -11,5 +12,8 @@ platforms: [linux, macos]
 provides_hooks:
   - pre_tool_call
   - transform_tool_result
+  - on_skill_lifecycle
+  - on_session_finalize
+  - pre_llm_call
 provides_middleware:
   - llm_request

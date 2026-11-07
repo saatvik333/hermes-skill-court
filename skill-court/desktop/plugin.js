@@ -80,6 +80,33 @@ function tokenCell(v) {
 
 const scopeName = model => (model === ANY_MODEL ? 'every model' : model)
 
+// Where a verdict's pair outcomes came from, as the CLI report words it: "2 checked, 1 judged".
+const describeSources = sources =>
+  [
+    ['check', 'checked'],
+    ['judge', 'judged']
+  ]
+    .filter(([key]) => sources[key])
+    .map(([key, label]) => `${sources[key]} ${label}`)
+    .join(', ') || 'no outcomes'
+
+function Cause({ row }) {
+  if (!row.cause) {
+    return null
+  }
+  return jsxs('div', {
+    className: 'flex max-w-80 flex-col gap-1 text-[0.6875rem] text-(--ui-text-secondary)',
+    children: [
+      jsx('p', { children: `Why: ${row.cause}` }),
+      row.cause_quote
+        ? jsxs('p', {
+            children: ['Skill line: ', jsx('q', { className: 'font-mono', children: row.cause_quote })]
+          })
+        : null
+    ]
+  })
+}
+
 function ActionCell({ row, act, pending, error }) {
   const hidden = row.quarantined
   if (!hidden && row.verdict !== 'hurts') {
@@ -139,6 +166,7 @@ function VerdictRow({ row, act, pending, error }) {
             row.reason
               ? jsx('span', { className: 'max-w-72 text-[0.6875rem] text-(--ui-text-tertiary)', children: row.reason })
               : null,
+            jsx(Cause, { row }),
             row.quarantined
               ? jsx('span', {
                   className: 'text-[0.6875rem] text-(--ui-text-secondary)',
@@ -150,10 +178,28 @@ function VerdictRow({ row, act, pending, error }) {
       }),
       jsx('td', { className: 'py-2 pr-4', children: successCell(row) }),
       jsx('td', { className: 'py-2 pr-4', children: tokenCell(row) }),
-      jsx('td', { className: 'py-2 pr-4 tabular-nums', children: row.tasks ?? row.pairs ?? '–' }),
+      jsx('td', {
+        className: 'py-2 pr-4 tabular-nums',
+        children: jsxs('div', {
+          children: [
+            jsx('div', { children: row.tasks ?? row.pairs ?? '–' }),
+            row.sources
+              ? jsx('div', {
+                  className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+                  children: describeSources(row.sources)
+                })
+              : null
+          ]
+        })
+      }),
       jsx('td', {
         className: 'py-2 pr-4 text-(--ui-text-secondary)',
-        children: jsx(Ago, { ms: Date.parse(row.judged_at) })
+        children: jsxs('div', {
+          children: [
+            jsx(Ago, { ms: Date.parse(row.judged_at) }),
+            row.auto ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'automatic' }) : null
+          ]
+        })
       }),
       jsx('td', { className: 'py-2', children: jsx(ActionCell, { act, error, pending, row }) })
     ]
@@ -204,14 +250,33 @@ function ManualQuarantine({ entries, act, pendingKey, errors }) {
   })
 }
 
-function Summary({ verdicts, quarantine }) {
+const usd = x => `$${(x ?? 0).toFixed(2)}`
+
+function Summary({ verdicts, quarantine, auto }) {
   const counts = verdicts.reduce((acc, v) => ({ ...acc, [v.verdict]: (acc[v.verdict] ?? 0) + 1 }), {})
   const parts = ['hurts', 'helps', 'neutral', 'inconclusive']
     .filter(k => counts[k])
     .map(k => `${counts[k]} ${k === 'hurts' ? 'hurt' : k === 'helps' ? 'help' : k}`)
-  return jsx('p', {
-    className: 'text-sm text-(--ui-text-secondary)',
-    children: `${verdicts.length} verdict${verdicts.length === 1 ? '' : 's'}: ${parts.join(', ')}. ${quarantine.length} quarantine${quarantine.length === 1 ? '' : 's'} active.`
+  const judged = verdicts.some(v => v.sources?.judge)
+  return jsxs('div', {
+    className: 'flex flex-col gap-1 text-sm text-(--ui-text-secondary)',
+    children: [
+      jsx('p', {
+        children: `${verdicts.length} verdict${verdicts.length === 1 ? '' : 's'}: ${parts.join(', ')}. ${quarantine.length} quarantine${quarantine.length === 1 ? '' : 's'} active.`
+      }),
+      jsx('p', {
+        children: auto?.enabled
+          ? `Automatic trials are on: ${usd(auto.spent_today_usd)} of ${usd(auto.daily_budget_usd)} spent on replays today.`
+          : 'Automatic trials are off. Turn them on with `hermes court auto on`.'
+      }),
+      judged
+        ? jsx('p', {
+            className: 'max-w-prose text-[0.6875rem] text-(--ui-text-tertiary)',
+            children:
+              'Judged tasks have no check: a judge model compared both runs’ answers and files, without knowing which run had the skill, in both orders. A run counts as failed only when the judge preferred the other run both times.'
+          })
+        : null
+    ]
   })
 }
 
@@ -280,7 +345,7 @@ function SkillCourtPage({ rest, source }) {
       children: jsx(Button, { onClick: () => query.refetch(), size: 'sm', variant: 'outline', children: 'Try again' })
     })
   } else {
-    const { verdicts, quarantine } = query.data
+    const { verdicts, quarantine, auto } = query.data
     const hiddenBy = v =>
       quarantine.filter(q => q.skill === v.skill && (q.model === v.model || q.model === ANY_MODEL)).map(q => q.model)
     const shown = new Set(verdicts.flatMap(v => hiddenBy(v).map(m => `${v.skill}\u0000${m}`)))
@@ -304,7 +369,7 @@ function SkillCourtPage({ rest, source }) {
       ? jsxs('div', {
           className: 'flex flex-col gap-6',
           children: [
-            jsx(Summary, { quarantine, verdicts }),
+            jsx(Summary, { auto, quarantine, verdicts }),
             jsx('div', {
               className: 'overflow-x-auto',
               children: jsxs('table', {

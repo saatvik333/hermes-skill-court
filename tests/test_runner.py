@@ -1,4 +1,8 @@
-from skill_court.runner import RunResult, apply_session_row, session_containers
+import base64
+import io
+import tarfile
+
+from skill_court.runner import RunResult, apply_session_row, session_containers, workspace_text
 
 SESSION = "local-" + "ab12" * 16
 
@@ -50,3 +54,36 @@ def test_ambiguous_labels_are_all_reported():
     profile = "p"
     label = f"profile_{profile}_{SESSION}"[:63]
     assert session_containers(profile, SESSION, [("a", label), ("b", label)]) == ["a", "b"]
+
+
+def archive(files):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, data in files:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def test_snapshot_shows_text_files_and_names_binary_ones():
+    text = workspace_text(archive([("workspace/total.txt", b"465\n"), ("workspace/logo.png", b"\x89PNG\x00\x01"),
+                                   ("workspace/latin1.txt", "café".encode("latin-1"))]))
+    assert text.splitlines() == [
+        "--- /workspace/total.txt (4 bytes)", "465",
+        "--- /workspace/logo.png (6 bytes), binary, not shown",
+        "--- /workspace/latin1.txt (4 bytes), binary, not shown",
+    ]
+
+
+def test_snapshot_stays_within_its_limit_and_says_what_it_left_out():
+    files = [(f"workspace/f{i}.txt", b"x" * 300) for i in range(10)]
+    text = workspace_text(archive(files), limit=1_000)
+    assert len(text) <= 1_000 + 40
+    assert text.endswith("more file(s) not shown]")
+    assert text.count("--- /workspace/") == 3  # two whole files and the start of the third
+
+
+def test_snapshot_of_nothing_or_garbage():
+    assert workspace_text(archive([])) == "(no files)"
+    assert workspace_text("not base64 at all!") == "(the sandbox's files could not be read)"

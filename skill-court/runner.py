@@ -4,12 +4,20 @@ Replays run as single-query sessions (``hermes chat -Q --oneshot``): approval pr
 ``approvals.single_query_mode`` (deny in replay profiles) instead of being auto-approved.
 ``--run-budget`` asks the agent to wrap up as the time limit nears; past it, the client gets
 SIGTERM, which interrupts the turn, and SIGKILL if it does not stop.
+
+A task without a check keeps the run's final answer and a bounded snapshot of the files it left
+in its sandbox, taken before the sandbox is removed, for the judge to compare.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 import json
+import math
 import re
+import tarfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -22,6 +30,13 @@ CHECK_TIMEOUT = 120
 # Seconds a timed-out replay gets after SIGTERM to interrupt its turn before SIGKILL.
 STOP_GRACE = 30
 _SESSION_LINE = re.compile(r"^session_id:\s*(\S+)\s*$", re.MULTILINE)
+# The sandbox snapshot: files under these directories that the run created or changed (status
+# change time inside the run), outside hidden directories, at most SNAPSHOT_FILES files of
+# SNAPSHOT_FILE_KB each, rendered to at most SNAPSHOT_CHARS characters.
+SNAPSHOT_ROOTS = ("/workspace", "/root")
+SNAPSHOT_FILES = 40
+SNAPSHOT_FILE_KB = 64
+SNAPSHOT_CHARS = 16_000
 
 
 @dataclass
@@ -36,12 +51,57 @@ class RunResult:
     cost_usd: float | None = None
     seconds: float | None = None
     error: str | None = None
+    answer: str | None = None  # the final answer the run printed
+    workspace: str | None = None  # sandbox snapshot, for tasks without a check
 
     def as_row(self) -> dict:
         row = asdict(self)
         for key in ("completed", "passed"):
             row[key] = None if row[key] is None else int(row[key])
         return row
+
+
+def workspace_text(archive_b64: str, limit: int = SNAPSHOT_CHARS) -> str:
+    """Render a base64 tar of sandbox files for the judge: text files in full up to ``limit``
+    characters overall; binary and non-UTF-8 files by name and size only."""
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(base64.b64decode(archive_b64)))
+    except (binascii.Error, tarfile.TarError, ValueError):
+        return "(the sandbox's files could not be read)"
+    parts: list[str] = []
+    used = shown = 0
+    with archive:
+        members = [m for m in archive.getmembers() if m.isfile()]
+        for member in members:
+            handle = archive.extractfile(member)
+            raw = handle.read() if handle is not None else b""
+            header = f"--- /{member.name.lstrip('/')} ({member.size} bytes)"
+            try:
+                text = raw.decode("utf-8")
+                binary = "\0" in text
+            except UnicodeDecodeError:
+                binary = True
+            block = f"{header}, binary, not shown" if binary else f"{header}\n{text.rstrip()}"
+            room = limit - used
+            if len(block) > room:
+                if not binary and room > len(header) + 1:
+                    parts.append(block[:room] + "…")
+                    shown += 1
+                break
+            parts.append(block)
+            used += len(block) + 1
+            shown += 1
+        if shown < len(members):
+            parts.append(f"[{len(members) - shown} more file(s) not shown]")
+    return "\n".join(parts) if parts else "(no files)"
+
+
+def _snapshot(container: str, minutes: int) -> str:
+    roots = " ".join(SNAPSHOT_ROOTS)
+    script = (f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
+              f" | head -n {SNAPSHOT_FILES} | tar -cf - -T - 2>/dev/null | base64")
+    proc = run([container_binary(), "exec", container, "sh", "-c", script], timeout=CHECK_TIMEOUT, check=False)
+    return workspace_text(proc.stdout) if proc.stdout.strip() else "(no files)"
 
 
 def session_containers(profile: str, session_id: str, labelled: list[tuple[str, str]]) -> list[str]:
@@ -85,6 +145,20 @@ def read_session(profile: str, session_id: str, result: RunResult) -> bool:
     if not row:
         return False
     return apply_session_row(row, result)
+
+
+def session_messages(profile: str, session_id: str) -> list[dict]:
+    """A replay's transcript from its profile's session store (read before the profile is deleted)."""
+    from hermes_state import SessionDB
+
+    db_path = profile_home(profile) / "state.db"
+    if not db_path.exists():
+        return []
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        return db.get_messages(session_id)
+    finally:
+        db.close()
 
 
 def apply_session_row(row: dict, result: RunResult) -> bool:
@@ -132,6 +206,8 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     finally:
         query.unlink(missing_ok=True)
     output = f"{stdout}\n{stderr}"
+    # Single-query mode prints only the final answer on stdout.
+    result.answer = stdout.strip() or None
     found = _SESSION_LINE.search(stderr)
     result.session_id = found.group(1) if found else None
     result.seconds = round(time.monotonic() - started, 1)
@@ -165,6 +241,12 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
                     # The agent never opened a sandbox, so it produced nothing the check could find.
                     result.passed = False
                     result.error = "no sandbox was created, so the check found nothing to verify"
+            elif container is not None:
+                result.workspace = _snapshot(container, math.ceil((time.monotonic() - started) / 60) + 1)
+            elif matches:
+                result.workspace = f"({len(matches)} sandboxes carry this session's label; none was read)"
+            else:
+                result.workspace = "(the run opened no sandbox, so it left no files)"
         if container is not None:
             run([container_binary(), "rm", "-f", container], timeout=60, check=False)
     except CommandError as exc:

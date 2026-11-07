@@ -61,17 +61,24 @@ def _verdicts() -> dict:
     for trial in store.latest_trials():
         current = library.get(trial["skill"])
         rows.append({
+            # success rates, intervals, token change and ``sources`` ({check, judge}: pairs scored each way)
             **json.loads(trial["summary"] or "{}"),
             "skill": trial["skill"],
             "model": trial["model"],
             "verdict": trial["verdict"],
             "judged_at": trial["finished_at"],
             "trial_id": trial["id"],
+            "auto": bool(trial["auto"]),
+            "cause": trial["cause"],
+            "cause_quote": trial["cause_quote"],
             "skill_changed": current is None or current.content_hash() != trial["skill_hash"],
             "quarantined": (trial["skill"], trial["model"]) in hidden or (trial["skill"], store.ANY_MODEL) in hidden,
         })
     quarantine = [{"skill": s, "model": m, "reason": r, "since": c} for s, m, r, c in store.quarantine_entries()]
-    return {"verdicts": rows, "quarantine": quarantine}
+    settings = store.auto_settings()
+    auto = {"enabled": settings.enabled, "daily_budget_usd": settings.daily_budget_usd,
+            "spent_today_usd": store.auto_spent_today()}
+    return {"verdicts": rows, "quarantine": quarantine, "auto": auto}
 
 
 def _quarantine(body: QuarantineBody) -> dict:

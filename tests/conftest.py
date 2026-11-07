@@ -20,6 +20,7 @@ sys.modules.setdefault("skill_court", _package)
 _constants = types.ModuleType("hermes_constants")
 _constants.get_hermes_home = lambda: _HOME["home"]
 _constants.get_default_hermes_root = lambda: _HOME["home"]
+_constants.profile_name_for_home = lambda path: "default" if path == _HOME["home"] else None
 sys.modules.setdefault("hermes_constants", _constants)
 
 
