@@ -14,11 +14,16 @@ from dataclasses import dataclass
 from hermes_constants import get_default_hermes_root
 
 from . import store
-from .procs import hermes
+from .procs import CommandError, container_binary, hermes, run
 
 ARMS = ("with", "without")
+# The profile description doubles as the ownership marker: Skill Court only ever deletes or
+# rebuilds a profile that carries it, never one the user happened to name the same way.
+DESCRIPTION = "Skill Court replay sandbox (created and deleted by the skill-court plugin)"
+MAX_TURNS = 60
 # Containers must outlive the one-shot session long enough for the check to run in them; the
-# runner removes each one itself right after its check.
+# runner removes each one itself right after its check. ``max_turns`` bounds a replay that loops:
+# a timed-out client only detaches, and the turn would otherwise keep running on the gateway.
 _SANDBOX_SETTINGS = (
     ("terminal.backend", "docker"),
     ("terminal.container_persistent", "false"),
@@ -26,6 +31,7 @@ _SANDBOX_SETTINGS = (
     ("terminal.docker_forward_env", "[]"),
     ("terminal.lifetime_seconds", "1800"),
     ("proxy.enabled", "false"),
+    ("agent.max_turns", str(MAX_TURNS)),
 )
 
 
@@ -39,8 +45,15 @@ def arm_profile(source: str, arm: str) -> str:
     return f"{source}-court-{arm}"[:64]
 
 
-def _profile_exists(name: str) -> bool:
-    return (get_default_hermes_root() / "profiles" / name).is_dir()
+def _profile_dir(name: str):
+    return get_default_hermes_root() / "profiles" / name
+
+
+def _owned(name: str) -> bool:
+    try:
+        return DESCRIPTION in (_profile_dir(name) / "profile.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return False
 
 
 def _yaml_list(names: list[str]) -> str:
@@ -61,23 +74,40 @@ def source_model(source: str) -> str:
     return out.splitlines()[0].strip() if out and "not set" not in out else ""
 
 
+def _remove_sandboxes(profile: str) -> None:
+    """Remove every container Hermes created for a replay profile (a timed-out run leaves one)."""
+    docker = container_binary()
+    ids = run([docker, "ps", "-a", "-q", "--filter", f"label=hermes-profile={profile}"], timeout=60).stdout.split()
+    if ids:
+        run([docker, "rm", "-f", *ids], timeout=120, check=False)
+
+
+def _delete(profile: str) -> None:
+    _remove_sandboxes(profile)
+    hermes("profile", "delete", "-y", profile)
+
+
 def _build(source: str, profile: str) -> None:
-    if _profile_exists(profile):
-        hermes("profile", "delete", "-y", profile)
-    hermes("profile", "create", profile, "--clone-from", source, "--no-alias",
-           "--description", "Skill Court replay sandbox (created and deleted by the skill-court plugin)")
+    if _profile_dir(profile).exists():
+        if not _owned(profile):
+            raise CommandError(f"a profile named '{profile}' already exists and was not created by Skill Court; "
+                               "rename it, or remove it yourself, before running a trial")
+        _delete(profile)
+    hermes("profile", "create", profile, "--clone-from", source, "--no-alias", "--description", DESCRIPTION)
     for key, value in _SANDBOX_SETTINGS:
         hermes("-p", profile, "config", "set", key, value)
     hermes("-p", profile, "plugins", "disable", store.PLUGIN, check=False)
 
 
-def prepare(source: str) -> Arms:
-    """Re-clone both replay profiles from ``source`` so they carry its current skills and config."""
-    profiles = {arm: arm_profile(source, arm) for arm in ARMS}
+def for_source(source: str) -> Arms:
+    return Arms(source=source, profiles={arm: arm_profile(source, arm) for arm in ARMS})
+
+
+def prepare(arms: Arms) -> None:
+    """Re-clone both replay profiles from the source so they carry its current skills and config."""
     with ThreadPoolExecutor(max_workers=len(ARMS)) as pool:
-        for future in [pool.submit(_build, source, p) for p in profiles.values()]:
+        for future in [pool.submit(_build, arms.source, p) for p in arms.profiles.values()]:
             future.result()
-    return Arms(source=source, profiles=profiles)
 
 
 def set_skill_under_test(arms: Arms, skill: str, hidden: list[str]) -> None:
@@ -90,5 +120,8 @@ def set_skill_under_test(arms: Arms, skill: str, hidden: list[str]) -> None:
 
 def remove(arms: Arms) -> None:
     for profile in arms.profiles.values():
-        if _profile_exists(profile):
-            hermes("profile", "delete", "-y", profile, check=False)
+        if _profile_dir(profile).exists() and _owned(profile):
+            try:
+                _delete(profile)
+            except CommandError as exc:
+                print(f"Skill Court: could not remove replay profile {profile}: {exc}")

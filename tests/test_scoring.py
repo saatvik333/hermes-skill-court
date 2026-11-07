@@ -50,3 +50,9 @@ def test_more_tokens_with_a_success_gain_is_not_an_efficiency_hurt():
 def test_intervals_are_reproducible():
     pairs = [pair(True, False), pair(False, True), pair(True, True, 1500, 1000), pair(False, False, 700, 1000)]
     assert score(pairs) == score(pairs)
+
+
+def test_token_change_ignores_pairs_without_an_outcome():
+    s = score([pair(True, True, 1000, 1000)] * 3 + [pair(None, True, 9000, 1000)])
+    assert s.verdict == NEUTRAL
+    assert abs(s.token_change) < 1e-9

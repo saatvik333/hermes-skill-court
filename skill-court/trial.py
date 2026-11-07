@@ -53,10 +53,13 @@ def _success(result: runner.RunResult, has_check: bool) -> bool | None:
 
 
 def _describe(result: runner.RunResult, has_check: bool) -> str:
-    if has_check:
-        state = "pass" if result.passed else "FAIL"
+    outcome = _success(result, has_check)
+    if outcome is None:
+        state = "no outcome"
+    elif has_check:
+        state = "pass" if outcome else "FAIL"
     else:
-        state = "done" if result.completed else "incomplete"
+        state = "done" if outcome else "incomplete"
     tokens = f"{result.tokens / 1000:.0f}k tokens" if result.tokens else "? tokens"
     cost = f"${result.cost_usd:.3f}" if result.cost_usd is not None else "$?"
     line = f"{state:<10} {result.api_calls or 0:>3} calls  {tokens:>11}  {cost}  {result.seconds or 0:.0f}s"

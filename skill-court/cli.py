@@ -117,8 +117,9 @@ def _cmd_trial(args: argparse.Namespace) -> int:
     rows = []
     with _trial_lock():
         print(f"Preparing replay sandboxes from profile '{source}' ...")
-        replay_arms = arms.prepare(source)
+        replay_arms = arms.for_source(source)
         try:
+            arms.prepare(replay_arms)
             for name, tasks in selected.items():
                 if budget.exhausted:
                     print(f"{name}: skipped, budget spent")

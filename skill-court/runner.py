@@ -33,42 +33,51 @@ class RunResult:
         return row
 
 
-def _containers(profile: str) -> dict[str, str]:
-    """``{container id: hermes-task-id label}`` for the sandboxes of one replay profile."""
-    docker = container_binary()
-    ids = run([docker, "ps", "-a", "-q", "--filter", f"label=hermes-profile={profile}"], timeout=60).stdout.split()
-    if not ids:
-        return {}
-    inspected = json.loads(run([docker, "inspect", *ids], timeout=60).stdout or "[]")
-    return {c["Id"]: ((c.get("Config") or {}).get("Labels") or {}).get("hermes-task-id", "") for c in inspected}
-
-
 def _session_container(profile: str, session_id: str) -> str | None:
-    # Hermes labels a session's sandbox ``profile_<profile>_<session id>``, truncated.
-    key = f"profile_{profile}_{session_id}"
-    prefix_len = len(f"profile_{profile}_")
-    for container_id, label in _containers(profile).items():
-        if len(label) > prefix_len + 8 and key.startswith(label):
-            return container_id
-    return None
+    """The sandbox Hermes created for one session of ``profile``.
+
+    Hermes labels it ``hermes-task-id=profile_<profile>_<session id>``, cut to 63 characters, and
+    ``hermes-profile=<profile>``. Filtering on both labels in one ``ps`` call avoids racing the
+    removal of other runs' containers.
+    """
+    label = f"profile_{profile}_{session_id}"[:63]
+    ids = run([container_binary(), "ps", "-a", "-q", "--filter", f"label=hermes-profile={profile}",
+               "--filter", f"label=hermes-task-id={label}"], timeout=60).stdout.split()
+    return ids[0] if ids else None
 
 
-def _read_usage(path: Path, result: RunResult) -> None:
+def _read_usage(path: Path, result: RunResult) -> bool:
+    """Fill ``result`` from the usage report; False when the turn never got a model response.
+
+    A provider or credential failure ends the run with ``failed`` and no ``turn_exit_reason``. That
+    says nothing about the skill, so such a run has no outcome. A turn that ran and stopped for its
+    own reasons (iteration budget, partial) did get responses and counts as not completed.
+    """
     try:
         usage = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return
+        return False
     total = usage.get("total_including_auxiliary") or {}
     result.session_id = usage.get("session_id")
     result.model = usage.get("model")
-    result.completed = bool(usage.get("completed")) and not usage.get("failed")
     result.api_calls = total.get("api_calls", usage.get("api_calls"))
     result.tokens = total.get("total_tokens", usage.get("total_tokens"))
     result.cost_usd = total.get("estimated_cost_usd", usage.get("estimated_cost_usd"))
+    if usage.get("failed") and not usage.get("turn_exit_reason"):
+        return False
+    result.completed = bool(usage.get("completed")) and not usage.get("failed")
+    return True
+
+
+def _tail(text: str, lines: int = 2, chars: int = 240) -> str:
+    kept = [line.strip() for line in (text or "").splitlines() if line.strip()][-lines:]
+    return " ".join(kept)[:chars]
 
 
 def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, timeout: float,
            model: str | None = None, provider: str | None = None) -> RunResult:
+    """Run ``prompt`` once in ``profile``. ``passed`` and ``completed`` stay None when the run has no
+    outcome (provider failure, timeout, missing report); such runs are left out of the verdict."""
     result = RunResult()
     usage_file = workdir / f"usage-{uuid.uuid4().hex}.json"
     argv = [hermes_binary(), "-p", profile, "-z", prompt, "--usage-file", str(usage_file)]
@@ -77,21 +86,22 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     if provider:
         argv += ["--provider", provider]
     started = time.monotonic()
+    output = ""
     try:
         proc = run(argv, timeout=timeout, check=False, cwd=str(workdir))
         result.exit_code = proc.returncode
+        output = f"{proc.stdout}\n{proc.stderr}"
     except CommandError as exc:
         result.error = str(exc)
     result.seconds = round(time.monotonic() - started, 1)
-    _read_usage(usage_file, result)
+    responded = _read_usage(usage_file, result)
     usage_file.unlink(missing_ok=True)
-    if result.session_id is None:
-        result.error = result.error or "the run produced no usage report"
-        return result
 
     try:
-        container = _session_container(profile, result.session_id)
-        if check_cmd is not None:
+        container = _session_container(profile, result.session_id) if result.session_id else None
+        if not responded:
+            result.error = result.error or f"no model response: {_tail(output) or 'no usage report'}"
+        elif check_cmd is not None:
             if container is None:
                 result.passed = False
                 result.error = "no sandbox was created, so the check found nothing to verify"

@@ -58,7 +58,7 @@ def score(pairs: list[Pair], *, min_pairs: int = 3, efficiency_margin: float = 0
     rng = random.Random(seed)
     judged = [p for p in pairs if p.with_skill.success is not None and p.without_skill.success is not None]
     deltas = [float(p.with_skill.success) - float(p.without_skill.success) for p in judged]
-    ratios = [math.log(p.with_skill.tokens / p.without_skill.tokens) for p in pairs
+    ratios = [math.log(p.with_skill.tokens / p.without_skill.tokens) for p in judged
               if p.with_skill.tokens and p.without_skill.tokens]
 
     success_with = _mean([float(p.with_skill.success) for p in judged]) if judged else None

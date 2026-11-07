@@ -16,8 +16,9 @@ from plugins.plugin_storage import plugin_db
 
 PLUGIN = "skill-court"
 ANY_MODEL = "*"
+SCHEMA_VERSION = 1
 
-_SCHEMA = """
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS quarantine (
     skill      TEXT NOT NULL,
     model      TEXT NOT NULL,
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS runs (
     seconds     REAL,
     error       TEXT
 );
+PRAGMA user_version = {SCHEMA_VERSION};
 """
 
 
@@ -71,7 +73,10 @@ def _now() -> str:
 
 def _connect() -> sqlite3.Connection:
     conn = plugin_db(PLUGIN)
-    conn.executescript(_SCHEMA)
+    # One cheap pragma instead of re-running the DDL on every hook call; a recreated file
+    # (plugin data deleted while Hermes runs) reads 0 and gets its tables back.
+    if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+        conn.executescript(_SCHEMA)
     return conn
 
 
