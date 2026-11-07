@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -14,13 +15,25 @@ from pydantic import BaseModel
 
 def _sibling(name: str) -> ModuleType:
     """Load one of the plugin's own modules from the folder above. Hermes imports this file on its
-    own, outside the plugin package; ``store`` and ``skills`` have no relative imports."""
+    own, outside the plugin package; ``store`` and ``skills`` have no relative imports.
+
+    The module is registered under its own ``skill_court_dashboard_*`` name before it runs, as the
+    standard importlib recipe does: its dataclasses look their module up in ``sys.modules``.
+    """
+    module_name = f"skill_court_dashboard_{name}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
     path = Path(__file__).resolve().parents[1] / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"skill_court_dashboard_{name}", path)
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[module_name]
+        raise
     return module
 
 

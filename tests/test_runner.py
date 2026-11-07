@@ -24,6 +24,14 @@ def test_a_session_the_model_never_answered_has_no_outcome():
     assert result.tokens is None and result.cost_usd is None
 
 
+def test_unpriced_session_reports_unknown_cost_not_zero():
+    result = RunResult()
+    apply_session_row(row(estimated_cost_usd=0, cost_status="unknown"), result)
+    assert result.cost_usd is None
+    apply_session_row(row(estimated_cost_usd=0.01, cost_status="estimated"), result)
+    assert result.cost_usd == 0.01
+
+
 def test_container_matches_routed_and_single_profile_labels():
     profile = "court-1a2b3c4d-without"
     routed = f"profile_{profile}_{SESSION}"[:63]

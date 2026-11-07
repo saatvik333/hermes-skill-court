@@ -1,8 +1,9 @@
 """One replay: run a task once in a replay profile, then check the result inside its sandbox.
 
 Replays run as single-query sessions (``hermes chat -Q --oneshot``): approval prompts follow
-``approvals.single_query_mode`` (deny in replay profiles) instead of being auto-approved, and
-``--run-budget`` makes the gateway itself end a turn that runs too long.
+``approvals.single_query_mode`` (deny in replay profiles) instead of being auto-approved.
+``--run-budget`` asks the agent to wrap up as the time limit nears; past it, the client gets
+SIGTERM, which interrupts the turn, and SIGKILL if it does not stop.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from .arms import MAX_TURNS, profile_home
 from .procs import CommandError, container_binary, hermes_binary, run
 
 CHECK_TIMEOUT = 120
-# Time the client waits past the gateway's own run budget before giving up on a run.
-CLIENT_GRACE = 120
+# Seconds a timed-out replay gets after SIGTERM to interrupt its turn before SIGKILL.
+STOP_GRACE = 30
 _SESSION_LINE = re.compile(r"^session_id:\s*(\S+)\s*$", re.MULTILINE)
 
 
@@ -91,7 +92,8 @@ def apply_session_row(row: dict, result: RunResult) -> bool:
     result.model = row.get("model")
     result.api_calls = row.get("api_call_count")
     result.tokens = tokens or None
-    result.cost_usd = row.get("estimated_cost_usd")
+    # Hermes stores an unpriced session's cost as 0 and marks it with cost_status "unknown".
+    result.cost_usd = None if row.get("cost_status") == "unknown" else row.get("estimated_cost_usd")
     return tokens > 0
 
 
@@ -116,7 +118,7 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     started = time.monotonic()
     output = ""
     try:
-        proc = run(argv, timeout=timeout + CLIENT_GRACE, check=False, cwd=str(workdir))
+        proc = run(argv, timeout=timeout, check=False, cwd=str(workdir), grace=STOP_GRACE)
         result.exit_code = proc.returncode
         output = f"{proc.stdout}\n{proc.stderr}"
         found = _SESSION_LINE.search(proc.stderr or "")
@@ -131,6 +133,8 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
         return result
 
     responded = read_session(profile, result.session_id, result)
+    # The gateway may not have flushed token counters yet; a completed turn with an answer did respond.
+    responded = responded or (result.exit_code == 0 and bool(proc.stdout.strip()))
     try:
         matches = session_containers(profile, result.session_id, _labelled_containers(profile))
         container = matches[0] if len(matches) == 1 else None

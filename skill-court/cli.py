@@ -40,7 +40,7 @@ def setup(parser: argparse.ArgumentParser) -> None:
     t.add_argument("--allow-unpriced", action="store_true",
                    help="Keep going when the provider reports no price, so the budget cannot apply")
     t.add_argument("--timeout", type=_positive(float), default=900,
-                   help="Seconds per run; Hermes ends a longer turn itself (default 900)")
+                   help="Seconds per run before it is interrupted (default 900)")
     t.add_argument("--model", help="Model for the replays (default: the profile's model)")
     t.add_argument("--provider", help="Provider for the replays")
     t.add_argument("--apply", action="store_true", help="Quarantine skills judged harmful, for that model")
@@ -246,7 +246,7 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"Released {args.skill} ({count} quarantine record{'s' if count != 1 else ''} removed).")
         return 0 if count else 1
     if command == "list":
-        rows = [list(r) for r in store.quarantine_entries()]
+        rows = [[skill, model, reason, _local(since)] for skill, model, reason, since in store.quarantine_entries()]
         print(_table(rows, ["skill", "model", "reason", "since"]) if rows else "No skills are quarantined.")
         return 0
     print("usage: hermes court {trial,report,tasks,quarantine,release,list}")

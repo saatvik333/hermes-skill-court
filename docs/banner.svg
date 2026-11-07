@@ -7,37 +7,37 @@
 
     <g font-size="21">
       <text x="72" y="292" fill="#6c7380">skill</text>
-      <text x="402" y="292" fill="#6c7380">success without → with</text>
-      <text x="752" y="292" fill="#6c7380">tokens</text>
-      <text x="902" y="292" fill="#6c7380">verdict</text>
+      <text x="402" y="292" fill="#6c7380">Claude Sonnet 5.5</text>
+      <text x="802" y="292" fill="#6c7380">Claude Haiku 5.5</text>
       <line x1="72" y1="308" x2="1128" y2="308" stroke="#2a2f38" stroke-width="2"/>
 
       <text x="72" y="350" fill="#e6e8eb">team-changelog</text>
-      <text x="402" y="350" fill="#e6e8eb">0% → 100%</text>
-      <text x="752" y="350" fill="#e6e8eb">+2%</text>
-      <rect x="896" y="326" width="96" height="32" rx="4" fill="#123d2a"/>
-      <text x="908" y="350" fill="#5fd39a">helps</text>
+      <rect x="396" y="326" width="80" height="32" rx="4" fill="#123d2a"/>
+      <text x="408" y="350" fill="#5fd39a">helps</text>
+      <text x="492" y="350" fill="#a9b0bc" font-size="18">0% → 100%</text>
+      <rect x="796" y="326" width="80" height="32" rx="4" fill="#123d2a"/>
+      <text x="808" y="350" fill="#5fd39a">helps</text>
+      <text x="892" y="350" fill="#a9b0bc" font-size="18">0% → 100%</text>
 
       <text x="72" y="402" fill="#e6e8eb">sales-csv-totals</text>
-      <text x="402" y="402" fill="#e6e8eb">100% → 0%</text>
-      <text x="752" y="402" fill="#e6e8eb">+53%</text>
-      <rect x="896" y="378" width="96" height="32" rx="4" fill="#4a1d1f"/>
-      <text x="908" y="402" fill="#ff8a8a">hurts</text>
-      <text x="1006" y="402" fill="#a9b0bc" font-size="18">quarantined</text>
+      <rect x="396" y="378" width="80" height="32" rx="4" fill="#4a1d1f"/>
+      <text x="408" y="402" fill="#ff8a8a">hurts</text>
+      <text x="492" y="402" fill="#a9b0bc" font-size="18">100% → 0%, quarantined</text>
+      <rect x="796" y="378" width="104" height="32" rx="4" fill="#262a31"/>
+      <text x="808" y="402" fill="#b9bec7">neutral</text>
 
       <text x="72" y="454" fill="#e6e8eb">python-venv-setup</text>
-      <text x="402" y="454" fill="#e6e8eb">100% → 100%</text>
-      <text x="752" y="454" fill="#e6e8eb">+54%</text>
-      <rect x="896" y="430" width="96" height="32" rx="4" fill="#4a1d1f"/>
-      <text x="908" y="454" fill="#ff8a8a">hurts</text>
-      <text x="1006" y="454" fill="#a9b0bc" font-size="18">quarantined</text>
+      <rect x="396" y="430" width="104" height="32" rx="4" fill="#262a31"/>
+      <text x="408" y="454" fill="#b9bec7">neutral</text>
+      <rect x="796" y="430" width="104" height="32" rx="4" fill="#262a31"/>
+      <text x="808" y="454" fill="#b9bec7">neutral</text>
 
       <text x="72" y="506" fill="#e6e8eb">json-format</text>
-      <text x="402" y="506" fill="#e6e8eb">100% → 100%</text>
-      <text x="752" y="506" fill="#e6e8eb">+0%</text>
-      <rect x="896" y="482" width="112" height="32" rx="4" fill="#262a31"/>
-      <text x="908" y="506" fill="#b9bec7">neutral</text>
+      <rect x="396" y="482" width="104" height="32" rx="4" fill="#262a31"/>
+      <text x="408" y="506" fill="#b9bec7">neutral</text>
+      <rect x="796" y="482" width="104" height="32" rx="4" fill="#262a31"/>
+      <text x="808" y="506" fill="#b9bec7">neutral</text>
     </g>
-    <text x="72" y="566" fill="#6c7380" font-size="17">Demo library, Claude Sonnet 5.5, 3 paired Docker replays per skill. Skill files never edited.</text>
+    <text x="72" y="566" fill="#6c7380" font-size="17">Demo library, 3 checked tasks per skill, paired Docker replays. Skill files never edited.</text>
   </g>
 </svg>

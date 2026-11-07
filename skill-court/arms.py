@@ -45,8 +45,12 @@ _SANDBOX_SETTINGS = (
     ("memory.provider", ""),
     ("plugins.enabled", "[]"),
     ("skills.write_approval", "true"),
+    # Prompts are answered by single_query_mode (deny), never by the smart-approval guardian, and
+    # the user's shell hooks, which run on the host, do not run in replays.
+    ("approvals.mode", "manual"),
     ("approvals.single_query_mode", "deny"),
-    ("agent.max_turns", str(MAX_TURNS)),
+    ("hooks", "{}"),
+    ("hooks_auto_accept", "false"),
 )
 _DISABLED_TOOLSETS = ("code_execution", "computer_use", "browser", "cronjob", "session_search",
                       "connections", "memory", "kanban", "image_gen", "video_gen", "tts")
