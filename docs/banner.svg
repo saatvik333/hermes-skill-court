@@ -39,6 +39,6 @@
       <rect x="796" y="482" width="104" height="32" rx="4" fill="#262a31"/>
       <text x="808" y="506" fill="#b9bec7">neutral</text>
     </g>
-    <text x="72" y="566" fill="#6c7380" font-size="17">Demo library, 3 checked tasks per skill, paired Docker replays. Skill files never edited.</text>
+    <text x="72" y="566" fill="#6c7380" font-size="17">Demo library, 3 checked tasks per skill, paired Docker replays. Quarantine never edits a skill.</text>
   </g>
 </svg>
