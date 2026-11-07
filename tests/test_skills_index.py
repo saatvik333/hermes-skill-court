@@ -1,10 +1,6 @@
 import json
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skill-court"))
-
-from skills_index import filter_skills_list, strip_request, strip_text  # noqa: E402
+from skill_court.skills_index import filter_skills_list, strip_request, strip_text
 
 PROMPT = """## Skills
 Before replying, scan the skills below.
