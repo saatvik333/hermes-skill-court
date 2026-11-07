@@ -9,3 +9,6 @@ license: MIT
 requires_hermes: ">=0.23.0"
 provides_hooks:
   - pre_tool_call
+  - transform_tool_result
+provides_middleware:
+  - llm_request

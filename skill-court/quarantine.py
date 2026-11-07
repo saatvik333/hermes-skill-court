@@ -1,23 +1,21 @@
 """Live enforcement of quarantine verdicts.
 
-Two enforcement points, because hiding a skill from the index does not stop ``skill_view(name)``:
-the ``llm_request`` middleware removes the skill's row from ``<available_skills>``, and the
-``pre_tool_call`` hook blocks a direct ``skill_view`` of it. Skill files are never touched.
+The skills index is not the only way a model finds a skill, so three points enforce a quarantine:
+the ``llm_request`` middleware removes the skill's row from ``<available_skills>``, the
+``transform_tool_result`` hook removes it from ``skills_list`` results, and the ``pre_tool_call``
+hook blocks a direct ``skill_view`` of it. Skill files are never touched.
 """
 
 from __future__ import annotations
 
-import logging
 from collections import OrderedDict
 from typing import Any
 
 from . import store
-from .skills_index import skill_key, strip_request
-
-logger = logging.getLogger(__name__)
+from .skills_index import filter_skills_list, skill_key, strip_request
 
 _SESSION_MODEL_CAP = 1024
-# pre_tool_call carries no model, so remember the model each session last sent a request with.
+# Tool hooks carry no model, so remember the model each session last sent a request with.
 _session_model: OrderedDict[str, str] = OrderedDict()
 
 
@@ -45,6 +43,13 @@ def on_llm_request(request: Any = None, session_id: str = "", model: str = "", *
         "source": store.PLUGIN,
         "reason": "quarantined for this model: " + ", ".join(sorted(removed)),
     }
+
+
+def on_transform_tool_result(tool_name: str = "", result: Any = None, session_id: str = "", **_: Any) -> str | None:
+    if tool_name != "skills_list" or not isinstance(result, str):
+        return None
+    hidden = store.hidden_for(_session_model.get(session_id, ""))
+    return filter_skills_list(result, frozenset(hidden)) if hidden else None
 
 
 def on_pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", **_: Any) -> dict | None:

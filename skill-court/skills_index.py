@@ -1,4 +1,5 @@
-"""Remove quarantined skills from the ``<available_skills>`` index of an outgoing LLM request.
+"""Remove quarantined skills from what the model sees: the ``<available_skills>`` index of an
+outgoing LLM request, and ``skills_list`` tool results.
 
 Pure functions over the provider request; no Hermes imports, so they test standalone.
 The index shapes handled are the ones ``agent/prompt_builder.py`` renders:
@@ -13,6 +14,7 @@ The index shapes handled are the ones ``agent/prompt_builder.py`` renders:
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Iterable
 
@@ -120,3 +122,23 @@ def strip_request(request: dict[str, Any], hidden: frozenset[str]) -> tuple[dict
                 out["messages"] = [{**first, "content": new}, *messages[1:]]
                 changed = True
     return (out if changed else None), removed
+
+
+def filter_skills_list(result: str, hidden: frozenset[str]) -> str | None:
+    """A ``skills_list`` JSON result without hidden skills, or None when nothing was removed."""
+    try:
+        payload = json.loads(result)
+    except ValueError:
+        return None
+    skills = payload.get("skills") if isinstance(payload, dict) else None
+    if not isinstance(skills, list):
+        return None
+    visible = [s for s in skills if not (isinstance(s, dict) and skill_key(str(s.get("name", ""))) in hidden)]
+    if len(visible) == len(skills):
+        return None
+    payload["skills"] = visible
+    payload["count"] = len(visible)
+    if isinstance(payload.get("categories"), list) and all(isinstance(s, dict) and "category" in s for s in skills):
+        remaining = {s["category"] for s in visible}
+        payload["categories"] = [c for c in payload["categories"] if c in remaining]
+    return json.dumps(payload, ensure_ascii=False)

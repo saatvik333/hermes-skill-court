@@ -1,9 +1,10 @@
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skill-court"))
 
-from skills_index import strip_request, strip_text  # noqa: E402
+from skills_index import filter_skills_list, strip_request, strip_text  # noqa: E402
 
 PROMPT = """## Skills
 Before replying, scan the skills below.
@@ -77,3 +78,22 @@ def test_request_shapes():
 def test_user_messages_are_not_rewritten():
     request = {"messages": [{"role": "user", "content": PROMPT}]}
     assert strip_request(request, frozenset({"arxiv"})) == (None, set())
+
+
+def test_skills_list_result_drops_hidden_skills_and_empty_categories():
+    result = json.dumps({
+        "success": True,
+        "skills": [
+            {"name": "deploy-preview", "description": "d", "category": "devops"},
+            {"name": "docker-cleanup", "description": "c", "category": "devops"},
+            {"name": "arxiv", "description": "a", "category": "research"},
+        ],
+        "categories": ["devops", "research"],
+        "count": 3,
+    })
+    filtered = json.loads(filter_skills_list(result, frozenset({"arxiv", "deploy-preview"})))
+    assert [s["name"] for s in filtered["skills"]] == ["docker-cleanup"]
+    assert filtered["count"] == 1
+    assert filtered["categories"] == ["devops"]
+    assert filter_skills_list(result, frozenset({"absent"})) is None
+    assert filter_skills_list("not json", frozenset({"arxiv"})) is None
