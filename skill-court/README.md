@@ -104,8 +104,9 @@ runs. So a pair without a check is judged by a model:
   or changed under `/workspace` and `/root` in its sandbox (captured before the sandbox is removed:
   at most 40 files of 64 KB, 16,000 characters in all, hidden directories skipped, binary files
   listed by name). The runs are labelled A and B; the judge is never told a skill exists. A run
-  whose files could not be read (the `docker exec` failed or timed out) has no outcome, so the pair
-  is not judged, rather than being compared as a run that left no files.
+  whose files could not be read (the `docker exec` or `tar` failed, it timed out, or the archive
+  does not read back) has no outcome, so the pair is not judged, rather than being compared as a
+  run that left no files.
 - **Both orders.** Each pair is judged twice, with the runs swapped. A run wins only when both
   orders pick it; a disagreement, which is the judge favouring a position, is a tie. The winner
   counts as a success and the loser as a failure; a tie is a success for both, so only agreed wins
@@ -155,11 +156,13 @@ Off until you turn it on. Then:
 5. The verdict is posted once, with `ctx.post_message`: a notice next to the conversation (a line in
    the CLI, a toast in Desktop, a message in a gateway chat), never text in the model's context. It
    goes to whoever changed the skill, at the start of their next turn: in the session that changed
-   it, or another chat of the same sender on the same platform (Hermes' `SessionDB` records each
-   session's platform and sender). A change made in your own CLI, TUI or Desktop, or in a session
-   whose sender Hermes did not record, is posted only in the CLI, TUI or Desktop, never in someone
+   it, or a later session of the same sender in the same chat on the same platform (Hermes'
+   `SessionDB` records each session's platform, sender and chat), so a verdict about a direct chat
+   never lands in a group. A change made in your own CLI, TUI or Desktop, or in a session whose
+   sender Hermes did not record, is posted only in the CLI, TUI or Desktop, never in someone
    else's chat. This one appeared in the CLI after the agent saved a skill from one user remark, in
-   a session with three requests it had answered correctly:
+   a session with three requests it had answered correctly (its release command now also names the
+   model):
 
    ```
    ☤ Hermes
@@ -169,8 +172,8 @@ Off until you turn it on. Then:
      checking. It divided the sum 60 by 100 and answered 0.60 instead of 60, even though these
      amounts (12, 30, 18) look like whole dollars. Skill line: "- The amount column is in cents
      (confirmed when the Q2 export was reconciled). Sum the amounts, divide by 100, and report
-     dollars with two decimals (e.g. 12345 -> 123.45).". `hermes court release shop-csv-totals`
-     undoes it.
+     dollars with two decimals (e.g. 12345 -> 123.45).". `hermes court release shop-csv-totals
+     --model claude-sonnet-5-5` undoes it.
    295
    ```
 
@@ -192,7 +195,7 @@ A quarantine hides a bad lesson; an appeal fixes it, with a verifier at each ste
 
 ```
 hermes court appeal sales-csv-totals --model claude-sonnet-5-5     # draft a fix and try it
-hermes court appeal show sales-csv-totals                          # the diff and the verdict
+hermes court appeal show sales-csv-totals --model claude-sonnet-5-5     # the diff and the verdict
 hermes court appeal apply sales-csv-totals --model claude-sonnet-5-5
 hermes court appeal undo sales-csv-totals --model claude-sonnet-5-5
 ```
@@ -202,17 +205,32 @@ hermes court appeal undo sales-csv-totals --model claude-sonnet-5-5
    failed run's excerpt: the smallest edit that removes the cause, the frontmatter `name` unchanged,
    the rule narrowed rather than the skill deleted. A `SKILL.md` over 16,000 characters gets no
    draft, since the judge would have to rewrite a file it was not shown in full.
-2. **Re-verify.** The draft goes on trial on the same tasks. The with-skill replay profile gets the
-   draft in place of its copy of the skill; the without-skill profile is unchanged. The appeal is
-   **granted** when the draft no longer hurts and its success with the skill beats the original's,
-   and **denied** otherwise, with the reason. The diff, the draft, its trial and the verdict are
-   stored.
-3. **Apply, only when you ask.** `appeal apply` (or **Apply fix** on the Desktop page) writes a
-   granted draft over the live `SKILL.md` in one atomic rename, only if the skill is unchanged since
-   the draft and not locked (`hermes curator lock`), and lifts the quarantine for that model. The
-   draft's trial, recorded under the draft's content hash, becomes the skill's current verdict.
-4. **Undo.** The original `SKILL.md` is kept in Skill Court's store; `appeal undo` writes it back
-   byte for byte, if the live file is still the applied draft, and restores the quarantine.
+2. **Check.** The draft is read with Hermes' own frontmatter parser, as Hermes would load it
+   (including its fallback for YAML it cannot parse, where the last `name` line wins). It must have
+   a closed frontmatter with the original's top-level `name` and a description, a body, and at most
+   twice the original's length (100,000 characters at most), and the skill directory with the draft
+   must pass Hermes' skill security scan (`tools.skills_guard`, under its policy for agent-written
+   skills). Otherwise nothing is tried.
+3. **Re-verify.** The draft goes on trial on the same tasks. The with-skill replay profile gets a
+   real copy of the skill directory with the draft as its `SKILL.md`, replacing the clone's copy
+   (which can be a symbolic link to your live skill, never written through); the without-skill
+   profile is unchanged. The appeal is **granted** when the draft no longer hurts and its success
+   with the skill beats the original's, and **denied** otherwise, with the reason. The diff, the
+   draft, its trial and the verdict are stored.
+4. **Apply, only when you ask.** `appeal apply` shows the diff and asks before writing (in a
+   terminal; a script passes `--yes`, and **Apply fix** on the Desktop page asks in a dialog). It
+   writes a granted draft over the live `SKILL.md` in one atomic rename, only if the live file holds
+   exactly the bytes the draft was made from, the skill is not locked (`hermes curator lock`), and
+   the draft passes the checks and the security scan again; then it lifts the quarantine for that
+   model. The draft's trial, recorded under the draft's content hash, becomes the skill's current
+   verdict. If the skill changes while the fix is written, the original is put back only over Skill
+   Court's own write, never over someone else's edit.
+5. **Undo.** The original `SKILL.md` is kept in Skill Court's store; `appeal undo` writes it back
+   byte for byte over the latest applied draft, if the live file still holds exactly that draft, and
+   restores the quarantine. Apply and undo run one at a time per profile (a lock in Skill Court's
+   plugin data), and neither writes through a `SKILL.md` that is a symbolic link: it may be shared
+   with other files or skills, so Skill Court refuses and you apply the shown diff to the linked file
+   yourself.
 
 After an automatic `hurts` with a cause, auto mode also drafts and tries an appeal within the same
 daily budget and judge tokens, and the notice says when a fix was proven. It never applies one.
@@ -224,7 +242,7 @@ daily budget and judge tokens, and the notice says when a fix was proven. It nev
 | `hermes court trial <skill>… \| --all` | Paired replays and a verdict per skill |
 | `hermes court report` | Latest verdict per skill and model, where its outcomes came from, whether the skill changed since, why a harmful skill hurt, and appeals |
 | `hermes court appeal <skill> [--model M] [--tasks N] [--reps R] [--budget USD]` | Draft a fix for a harmful verdict and try it on the same tasks |
-| `hermes court appeal show\|apply\|undo <skill> [--model M]` | See the draft and its verdict; write a granted draft over `SKILL.md`; put the original back |
+| `hermes court appeal show\|apply\|undo <skill> [--model M] [--yes]` | See the draft and its verdict; write a granted draft over `SKILL.md` (asking first unless `--yes`); put the original back |
 | `hermes court auto on [--budget USD] [--quiet-minutes M] [--judge-tokens N]` | Try every skill the agent writes or changes automatically |
 | `hermes court auto off` / `status` | Stop that; show today's spend and judge tokens, and the 20 latest queued changes and notices |
 | `hermes court tasks list <skill>` | A skill's replay tasks |
@@ -326,8 +344,13 @@ hermes -p courtlab court report
   leftover sandboxes are removed when the next trial rebuilds the replay profiles. The quiet-period
   start is checked only when a turn starts, so a session that has gone silent waits for the next
   turn anywhere in the profile.
-- A verdict for a messaging sender waits until that sender's next turn on that platform; `hermes
+- A verdict for a messaging sender waits until that sender's next turn in the same chat; `hermes
   court auto status` shows the latest notices and who each one waits for.
+- A Hermes 0.23 gateway serving the profile can leak a hosted-room poller thread when profiles are
+  created and deleted in quick succession, which each trial's replay clones (two per skill) do. The
+  symptom is `state.db was replaced underneath the gateway` repeating in `agent.log` every 5 seconds
+  until the gateway restarts; no data is affected. The race is in Hermes core, and a fix is proposed
+  upstream.
 - Quarantine hides a skill from the agent's skill index and skill tools; the file stays readable to
   file tools.
 - An appeal's draft is proven on the tasks that found the harm, not on every use of the skill: a
@@ -342,8 +365,9 @@ hermes -p courtlab court report
 - **Runs commands when you run `hermes court trial`, or with automatic trials on:**
   `hermes profile create/delete`, `hermes -p … config set/get` and `hermes -p … tools disable` for
   the replay profiles, `hermes -p <replay profile> chat -Q --oneshot` for each run, and `docker` (or
-  `podman`) `version`, `ps`, `inspect`, `exec` (the task's check, or a `find | tar | base64` that
-  reads the run's files for the judge) and `rm -f` on the replay sandboxes.
+  `podman`) `version`, `ps`, `inspect`, `exec` (the task's check, or a `find | tar` into a temporary
+  file in the sandbox, then `base64`, that reads the run's files for the judge) and `rm -f` on the
+  replay sandboxes.
 - **Starts a background process only with automatic trials on:** `hermes -p <profile> court trial
   --auto`, in its own process session, started by a hook in the process running your session
   (normally the gateway), without the Hermes launch flags of that process's environment. It writes
@@ -375,20 +399,24 @@ hermes -p courtlab court report
   Environment variables that a loaded skill declares it needs are still passed into the sandbox, as
   in normal Hermes use, and web search uses your own search keys.
 - **Reads:** session history through Hermes' read-only `SessionDB` (including the transcripts of its
-  own replays, and the platform and sender Hermes recorded for each session that changed a skill, to
-  decide who is told its verdict), the skill catalog through Hermes' public skill helpers and the
-  skills directory's `.usage.json`, and `skills.disabled` / `model.default` through `hermes config get`.
+  own replays, and the platform, sender and chat Hermes recorded for each session that changed a
+  skill, and for the session of a turn a verdict may be meant for, to decide who is told it), the
+  skill catalog through Hermes' public skill helpers and the skills directory's `.usage.json`, and
+  `skills.disabled` / `model.default` through `hermes config get`. An appeal's draft is read with
+  Hermes' `agent.skill_utils.parse_frontmatter` and scanned with `tools.skills_guard`.
 - **Hooks:** with automatic trials on, `on_skill_lifecycle` records the name of each skill the agent
   creates, patches or edits, and the session it happened in; `on_session_finalize` and
   `pre_llm_call` start the queue. `pre_llm_call` also posts, with `ctx.post_message`, the finished
-  verdicts meant for that turn: about its own session, for the same sender on the same platform, or,
-  on your CLI, TUI or Desktop, those about your own sessions and sessions with no recorded sender.
-  It never adds anything to the model's context.
-- **Writes:** its own `plugin-data/skill-court/` (`data.db`, `auto.log`, run scratch files), and a
-  drafted `SKILL.md` into the with-skill replay profile while an appeal is on trial. A live skill
-  file is written only by `hermes court appeal apply` (or **Apply fix**), after the draft was proven
-  on trial and only if the skill is unchanged and unlocked, and by `appeal undo`, which writes the
-  original back from the store. It never deletes a skill.
+  verdicts meant for that turn: about its own session, for the same sender in the same chat on the
+  same platform, or, on your CLI, TUI or Desktop, those about your own sessions and sessions with no
+  recorded sender. It never adds anything to the model's context.
+- **Writes:** its own `plugin-data/skill-court/` (`data.db`, `auto.log`, the `trial.lock` and
+  `appeal.lock` files, run scratch files), and a real copy of the skill directory with the drafted
+  `SKILL.md` into the with-skill replay profile while an appeal is on trial. A live skill file is
+  written only by `hermes court appeal apply` (or **Apply fix**), after the draft was proven on
+  trial and only if the live file is exactly what the draft was made from and the skill is
+  unlocked, and by `appeal undo`, which writes the original back from the store. It never deletes a
+  skill and never writes through a symbolic link.
 - **No network calls of its own** and no telemetry.
 
 ## License

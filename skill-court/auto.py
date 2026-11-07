@@ -68,6 +68,16 @@ def _delivered(handle: Any) -> bool:
     return handle.ok and handle.result.get("delivered") is not False
 
 
+def _read_origin(session_id: str) -> tuple[str | None, str | None, str | None]:
+    """``mining.session_origin``; Nones when the history cannot be read, which leaves a notice to
+    the narrowest audience: its own session, or the owner."""
+    try:
+        return mining.session_origin(session_id)
+    except Exception:
+        logger.warning("Skill Court: could not read session %s", session_id, exc_info=True)
+        return None, None, None
+
+
 def notifier(ctx: Any) -> Callable[..., None]:
     """The ``pre_llm_call`` hook: start trials whose changes went quiet, and post the finished
     verdicts meant for this turn's session. It returns nothing, so nothing is added to the model's
@@ -77,7 +87,11 @@ def notifier(ctx: Any) -> Callable[..., None]:
         if settings.enabled:
             _launch(settings)
         surface = platform or ctx.session_surface()
-        claimed = store.claim_notices(session_id or "", surface, sender_id or "", surface in LOCAL_SURFACES)
+        local = surface in LOCAL_SURFACES
+        # The turn's chat, read only when a notice waits for this sender on this platform.
+        chat_id = (_read_origin(session_id)[2] if not local and sender_id and session_id
+                   and store.has_notices_for(surface, sender_id) else None)
+        claimed = store.claim_notices(session_id or "", surface, sender_id or "", chat_id, local)
         for index, (notice_id, text) in enumerate(claimed):
             handle = ctx.post_message(text)
             if _delivered(handle):
@@ -92,22 +106,19 @@ def notifier(ctx: Any) -> Callable[..., None]:
 def origin(session_id: str) -> store.Origin:
     """Who a notice about a change made in ``session_id`` is for. A session whose platform or sender
     Hermes did not record, or that the owner ran on a local client, belongs to the owner."""
-    try:
-        source, sender = mining.session_origin(session_id)
-    except Exception:  # an unreadable history: the owner, the narrowest audience, is told
-        logger.warning("Skill Court: could not read session %s", session_id, exc_info=True)
-        source = sender = None
+    source, sender, chat_id = _read_origin(session_id)
     if source in _LOCAL_SOURCES:
         return store.Origin(session_id or None, store.LOCAL, None)
-    return store.Origin(session_id or None, source, sender)
+    return store.Origin(session_id or None, source, sender, chat_id)
 
 
 def origins(sessions: list[str]) -> list[store.Origin]:
-    """One origin per audience of the sessions that changed a skill: each sender, and the owner."""
-    found: dict[tuple[str | None, str] | None, store.Origin] = {}
+    """One origin per audience of the sessions that changed a skill: each sender in each chat, and
+    the owner."""
+    found: dict[tuple[str | None, str, str | None] | None, store.Origin] = {}
     for session in sessions:
         o = origin(session)
-        found.setdefault((o.platform, o.sender) if o.sender else None, o)
+        found.setdefault((o.platform, o.sender, o.chat_id) if o.sender else None, o)
     return list(found.values())
 
 
@@ -192,10 +203,10 @@ def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None) -> 
             text += f" Cause: {_sentence(outcome.cause)}"
             text += f" Skill line: \"{outcome.quote}\"." if outcome.quote else ""
         if outcome.quarantined:
-            text += f" `hermes court release {skill}` undoes it."
+            text += f" `hermes court release {skill} --model {model}` undoes it."
         if proposed is not None and proposed["verdict"] == GRANTED:
-            text += (f" A fix was proven: {_sentence(proposed['reason'])} See it with `hermes court appeal show {skill}`, "
-                     f"apply it with `hermes court appeal apply {skill}`.")
+            text += (f" A fix was proven: {_sentence(proposed['reason'])} See it with `hermes court appeal show {skill} "
+                     f"--model {model}`, apply it with `hermes court appeal apply {skill} --model {model}`.")
         elif proposed is not None:
             text += f" A drafted fix did not pass its trial: {_sentence(proposed['reason'])}"
         return text

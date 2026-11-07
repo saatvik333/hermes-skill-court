@@ -134,12 +134,13 @@ async def appeal(skill: str, model: str) -> dict:
 
 def _apply(body: SkillModelBody) -> dict:
     # The same command a terminal runs, so its checks (granted, unchanged since the draft, not
-    # locked) and its atomic write live in one place.
+    # locked, a loadable draft that passes Hermes' security scan) and its atomic write live in one
+    # place. The page asked the user to confirm already, hence --yes.
     profile = profile_name_for_home(get_hermes_home())
     if profile is None:
         raise HTTPException(status_code=409, detail="Skill Court needs a Hermes profile home")
-    proc = procs.run([procs.hermes_binary(), "-p", profile, "court", "appeal", "apply", body.skill, "--model", body.model],
-                     timeout=120, check=False)
+    proc = procs.run([procs.hermes_binary(), "-p", profile, "court", "appeal", "apply", body.skill, "--model", body.model,
+                      "--yes"], timeout=120, check=False)
     message = " ".join((proc.stdout or proc.stderr).split())
     if proc.returncode != 0:
         raise HTTPException(status_code=409, detail=message.removeprefix("Skill Court: "))

@@ -119,7 +119,7 @@ function AppealCell({ row, applyFix }) {
   }
   const note = text => jsx('p', { className: 'max-w-80 text-[0.6875rem] text-(--ui-text-secondary)', children: text })
   if (appeal.applied) {
-    return note(`Fix applied (appeal #${appeal.id}). Undo: hermes court appeal undo ${row.skill}`)
+    return note(`Fix applied (appeal #${appeal.id}). Undo: hermes court appeal undo ${row.skill} --model ${row.model}`)
   }
   if (appeal.verdict !== 'granted') {
     return note(appeal.verdict ? `Fix denied: ${appeal.reason}` : 'A drafted fix is still on trial.')
@@ -154,7 +154,7 @@ function AppealCell({ row, applyFix }) {
       jsx(ConfirmDialog, {
         busyLabel: 'Applying…',
         confirmLabel: 'Apply fix',
-        description: `This overwrites ${appeal.path} with the draft from appeal #${appeal.id}. The current text is kept in Skill Court's store; \`hermes court appeal undo ${row.skill}\` puts it back. The quarantine for ${row.model} is lifted.`,
+        description: `This overwrites ${appeal.path} with the draft from appeal #${appeal.id}. The current text is kept in Skill Court's store; \`hermes court appeal undo ${row.skill} --model ${row.model}\` puts it back. The quarantine for ${row.model} is lifted.`,
         destructive: true,
         doneLabel: 'Applied',
         onClose: () => setOpen(false),

@@ -63,48 +63,58 @@ class RunResult:
 
 def workspace_text(archive_b64: str, limit: int = SNAPSHOT_CHARS) -> str:
     """Render a base64 tar of sandbox files for the judge: text files in full up to ``limit``
-    characters overall; binary and non-UTF-8 files by name and size only."""
-    try:
-        archive = tarfile.open(fileobj=io.BytesIO(base64.b64decode(archive_b64)))
-    except (binascii.Error, tarfile.TarError, ValueError):
-        return "(the sandbox's files could not be read)"
+    characters overall; binary and non-UTF-8 files by name and size only. Raises ``CommandError``
+    for an archive that cannot be read, which the judge must never take for a run without files."""
     parts: list[str] = []
     used = shown = 0
-    with archive:
-        members = [m for m in archive.getmembers() if m.isfile()]
-        for member in members:
-            handle = archive.extractfile(member)
-            raw = handle.read() if handle is not None else b""
-            header = f"--- /{member.name.lstrip('/')} ({member.size} bytes)"
-            try:
-                text = raw.decode("utf-8")
-                binary = "\0" in text
-            except UnicodeDecodeError:
-                binary = True
-            block = f"{header}, binary, not shown" if binary else f"{header}\n{text.rstrip()}"
-            room = limit - used
-            if len(block) > room:
-                if not binary and room > len(header) + 1:
-                    parts.append(block[:room] + "…")
-                    shown += 1
-                break
-            parts.append(block)
-            used += len(block) + 1
-            shown += 1
-        if shown < len(members):
-            parts.append(f"[{len(members) - shown} more file(s) not shown]")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(archive_b64))) as archive:
+            members = [m for m in archive.getmembers() if m.isfile()]
+            for member in members:
+                handle = archive.extractfile(member)
+                raw = handle.read() if handle is not None else b""
+                header = f"--- /{member.name.lstrip('/')} ({member.size} bytes)"
+                try:
+                    text = raw.decode("utf-8")
+                    binary = "\0" in text
+                except UnicodeDecodeError:
+                    binary = True
+                block = f"{header}, binary, not shown" if binary else f"{header}\n{text.rstrip()}"
+                room = limit - used
+                if len(block) > room:
+                    if not binary and room > len(header) + 1:
+                        parts.append(block[:room] + "…")
+                        shown += 1
+                    break
+                parts.append(block)
+                used += len(block) + 1
+                shown += 1
+    except (binascii.Error, tarfile.TarError, OSError, ValueError) as exc:
+        raise CommandError(f"the sandbox's files could not be read: {exc}") from None
+    if shown < len(members):
+        parts.append(f"[{len(members) - shown} more file(s) not shown]")
     return "\n".join(parts) if parts else "(no files)"
+
+
+def snapshot_script(minutes: int) -> str:
+    """The shell script that prints, base64-encoded, a tar of the files the run created or changed.
+    The archive goes to a temporary file first, so tar's own exit status is the script's."""
+    roots = " ".join(SNAPSHOT_ROOTS)
+    return ("for tool in tar base64 mktemp; do\n"
+            "  command -v \"$tool\" >/dev/null || { echo \"$tool is missing\" >&2; exit 127; }\n"
+            "done\n"
+            "archive=$(mktemp) || exit 1\n"
+            f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
+            f" | head -n {SNAPSHOT_FILES} | tar -cf \"$archive\" -T - && base64 \"$archive\"\n"
+            "status=$?\n"
+            "rm -f \"$archive\"\n"
+            "exit $status\n")
 
 
 def _snapshot(container: str, minutes: int) -> str:
     """The run's files for the judge. Raises ``CommandError`` (``TimedOut`` past the check timeout)
     when they could not be read, so a failed read is never taken for a run that left no files."""
-    roots = " ".join(SNAPSHOT_ROOTS)
-    script = ("command -v tar >/dev/null && command -v base64 >/dev/null"
-              " || { echo 'tar or base64 is missing' >&2; exit 127; }; "
-              f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
-              f" | head -n {SNAPSHOT_FILES} | tar -cf - -T - 2>/dev/null | base64")
-    proc = run([container_binary(), "exec", container, "sh", "-c", script], timeout=CHECK_TIMEOUT)
+    proc = run([container_binary(), "exec", container, "sh", "-c", snapshot_script(minutes)], timeout=CHECK_TIMEOUT)
     return workspace_text(proc.stdout) if proc.stdout.strip() else "(no files)"
 
 

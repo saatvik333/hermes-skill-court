@@ -1,5 +1,6 @@
 import base64
 import io
+import os
 import subprocess
 import tarfile
 
@@ -91,7 +92,27 @@ def test_snapshot_stays_within_its_limit_and_says_what_it_left_out():
 
 def test_snapshot_of_nothing_or_garbage():
     assert workspace_text(archive([])) == "(no files)"
-    assert workspace_text("not base64 at all!") == "(the sandbox's files could not be read)"
+    # An archive that cannot be read is a failed snapshot, never text the judge would weigh.
+    with pytest.raises(CommandError, match="could not be read"):
+        workspace_text("not base64 at all!")
+    with pytest.raises(CommandError, match="could not be read"):
+        workspace_text(archive([("workspace/total.txt", b"465\n" * 400)])[:400])
+
+
+def test_a_tar_that_fails_behind_the_pipe_fails_the_snapshot(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    tar = bin_dir / "tar"
+    tar.write_text('#!/bin/sh\necho partial > "$2"\necho "tar: /workspace/total.txt: Cannot open" >&2\nexit 2\n')
+    tar.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    failed = subprocess.run(["sh", "-c", runner.snapshot_script(5)], capture_output=True, text=True, env=env,
+                            cwd=tmp_path)
+    assert failed.returncode == 2 and "Cannot open" in failed.stderr
+    tar.unlink()  # the real tar: the same script succeeds
+    ok = subprocess.run(["sh", "-c", runner.snapshot_script(5)], capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert ok.returncode == 0
+    workspace_text(ok.stdout)
 
 
 @pytest.fixture
@@ -132,7 +153,8 @@ def test_a_sandbox_that_left_no_files_is_judged_on_its_answer(sandbox, tmp_path)
     assert sandbox[1] == [["exec", "c1"], ["rm", "-f"]]
 
 
-@pytest.mark.parametrize("failure", [{"returncode": 1, "stdout": ""}, {"timeout": True}])
+@pytest.mark.parametrize("failure", [{"returncode": 1, "stdout": ""}, {"timeout": True},
+                                     {"returncode": 0, "stdout": "not base64 at all!"}])
 def test_a_sandbox_whose_files_could_not_be_read_gives_no_outcome_and_is_still_removed(sandbox, tmp_path, failure):
     snapshot, commands = sandbox
     snapshot.update(failure)

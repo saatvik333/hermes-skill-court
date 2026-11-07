@@ -62,8 +62,8 @@ def test_a_1_1_database_keeps_its_settings_queue_and_notices(hermes_home):
     assert store.auto_settings() == store.AutoSettings(True, 5.0, 10.0, store.AUTO_DEFAULTS.daily_judge_tokens)
     assert [(r["skill"], r["state"], r["last_attempt_at"]) for r in store.auto_queue_rows(5)] == [("s", "queued", None)]
     # A notice from before origins were recorded goes to the owner's own clients only.
-    assert store.claim_notices("tg-1", "telegram", "42", local=False) == []
-    assert [text for _id, text in store.claim_notices("cli-1", "cli", "", local=True)] == ["an old verdict"]
+    assert store.claim_notices("tg-1", "telegram", "42", "dm-42", local=False) == []
+    assert [text for _id, text in store.claim_notices("cli-1", "cli", "", None, local=True)] == ["an old verdict"]
     assert store.auto_judge_tokens_today() == 0
 
 

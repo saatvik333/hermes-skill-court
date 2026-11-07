@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -73,6 +74,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
                     help="Stop starting runs past this spend in USD (default 3)")
     ap.add_argument("--timeout", type=_positive(float), default=900,
                     help="Seconds per run before it is interrupted (default 900)")
+    ap.add_argument("--yes", action="store_true",
+                    help="appeal apply: write the fix without showing it and asking first (for scripts)")
 
     a = subs.add_parser("auto", help="Test skills automatically after the agent writes or changes them")
     asubs = a.add_subparsers(dest="auto_command")
@@ -403,6 +406,8 @@ def _cmd_report() -> int:
             print(f"  {a['skill']} on {a['model']}: #{a['id']} {state}: {a['reason'] or 'its trial did not finish'}")
             if a["verdict"] == appeal.GRANTED and not a["applied_at"]:
                 print(f"    apply: hermes court appeal apply {a['skill']} --model {a['model']}")
+            elif a["applied_at"]:
+                print(f"    undo: hermes court appeal undo {a['skill']} --model {a['model']}")
     return 0
 
 
@@ -435,9 +440,24 @@ def _cmd_appeal(args: argparse.Namespace, llm: Any) -> int:
               f"{': ' + shown['reason'] if shown['reason'] else ''}\n\n{shown['diff']}")
         if shown["verdict"] == appeal.GRANTED and not shown["applied_at"]:
             print(f"Apply it: hermes court appeal apply {name} --model {shown['model']}")
+        elif shown["applied_at"]:
+            print(f"Undo it: hermes court appeal undo {name} --model {shown['model']}")
         return 0
     if action == "apply":
-        applied = appeal.apply(skill, model)
+        pending = appeal.granted(skill, model)
+        if not args.yes:
+            if not sys.stdin.isatty():
+                print(f"Nothing was written: pass --yes to apply appeal #{pending['id']} without being asked.")
+                return 2
+            print(f"Appeal #{pending['id']} writes this over {skill.path / 'SKILL.md'}:\n\n{pending['diff']}")
+            try:
+                answer = input("Apply it? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Nothing was written.")
+                return 1
+        applied = appeal.apply(skill, model, pending["id"])
         print(f"Applied appeal #{applied['id']}: wrote {skill.path / 'SKILL.md'}. The original is kept in Skill Court's "
               f"store; `hermes court appeal undo {name} --model {model}` puts it back.")
         print(f"{name} is visible to {model} again." if name not in store.hidden_for(model)
@@ -457,7 +477,7 @@ def _cmd_appeal(args: argparse.Namespace, llm: Any) -> int:
         decided = appeal.draft_and_try(source, skill, model, opts, budget, Judge(llm), print, task_limit=args.tasks)
     print(f"\nAppeal #{decided['id']}: {decided['verdict'].upper()}: {decided['reason']}.")
     print(f"Apply it: hermes court appeal apply {name} --model {model}" if decided["verdict"] == appeal.GRANTED
-          else f"{name} stays as it is; see the draft again with: hermes court appeal show {name}")
+          else f"{name} stays as it is; see the draft again with: hermes court appeal show {name} --model {model}")
     print(f"Spent at least ${budget.spent:.2f} of ${budget.limit:.2f} on replays.")
     return 0
 
@@ -483,9 +503,9 @@ def _cmd_auto(args: argparse.Namespace) -> int:
               "toward the dollar budget only if Hermes reports their price.\n"
               "A skill that hurts a model (the model succeeds less often with it, or uses at least 25% more tokens "
               "at equal success) is hidden from that model; when the agent changes it and it no longer hurts, "
-              "that quarantine is lifted. The verdict is posted at the start of the next turn of the conversation "
-              "that changed the skill, or of the same sender's other chats on that platform; changes made in the "
-              "CLI, TUI or Desktop are posted there. Undo a quarantine with: hermes court release <skill>. "
+              "that quarantine is lifted. The verdict is posted at the start of the next turn of the session that "
+              "changed the skill, or of the same sender's next session in the same chat; changes made in the "
+              "CLI, TUI or Desktop are posted there. Undo a quarantine with: hermes court release <skill> --model <model>. "
               "Stop with: hermes court auto off")
         return 0
     if command == "off":
@@ -575,7 +595,8 @@ def dispatch(args: argparse.Namespace, llm: Any) -> int:
     if command == "quarantine":
         store.quarantine(args.skill, args.model, args.reason)
         scope = "every model" if args.model == store.ANY_MODEL else args.model
-        print(f"Quarantined {args.skill} for {scope}. Its files are unchanged; undo with: hermes court release {args.skill}")
+        undo = f"hermes court release {args.skill}" + ("" if args.model == store.ANY_MODEL else f" --model {args.model}")
+        print(f"Quarantined {args.skill} for {scope}. Its files are unchanged; undo with: {undo}")
         return 0
     if command == "release":
         count = store.release(args.skill, args.model)

@@ -99,22 +99,23 @@ def session_requests(session_id: str) -> list[str]:
         db.close()
 
 
-def session_origin(session_id: str) -> tuple[str | None, str | None]:
-    """``(source, user_id)`` Hermes stored for one session of the active profile: the platform or
-    client it ran on and its sender. Nones when the session is not stored or a field is empty."""
+def session_origin(session_id: str) -> tuple[str | None, str | None, str | None]:
+    """``(source, user_id, chat_id)`` Hermes stored for one session of the active profile: the
+    platform or client it ran on, its sender and its chat. Nones when the session is not stored or a
+    field is empty."""
     from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
 
     if not session_id or not (get_hermes_home() / "state.db").exists():
-        return None, None
+        return None, None, None
     db = SessionDB(read_only=True)
     try:
         row = db.get_session(session_id)
     finally:
         db.close()
     if not row:
-        return None, None
-    return row.get("source") or None, row.get("user_id") or None
+        return None, None, None
+    return row.get("source") or None, row.get("user_id") or None, row.get("chat_id") or None
 
 
 def mine(wanted: Iterable[str] | None, per_skill: int) -> dict[str, list[MinedTask]]:

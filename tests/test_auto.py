@@ -195,16 +195,20 @@ def test_a_post_that_timed_out_still_lands_and_one_nobody_saw_waits():
     assert turn() == []
 
 
-def test_a_notice_reaches_only_its_session_or_the_same_sender():
-    store.add_notice(None, "for alice", store.Origin("tg-1", "telegram", "alice"))
+def test_a_notice_reaches_only_its_session_or_the_same_sender_in_the_same_chat(monkeypatch):
+    chats = {"tg-2": "dm-bob", "tg-3": "group-7", "tg-4": "dm-alice", "dc-1": "dm-alice"}
+    monkeypatch.setattr(auto.mining, "session_origin", lambda session: ("telegram", None, chats.get(session)))
+    store.add_notice(None, "for alice", store.Origin("tg-1", "telegram", "alice", "dm-alice"))
     store.add_notice(None, "for an api client", store.Origin("api-1", "api_server", None))
     store.add_notice(None, "for the owner", OWNER)
     store.add_notice(None, "origin unknown", store.Origin(None, None, None))
     assert turn(session_id="tg-2", platform="telegram", sender="bob") == []
-    assert turn(session_id="dc-1", platform="discord", sender="alice") == []  # same id, another platform
+    assert turn(session_id="dc-1", platform="discord", sender="alice") == []  # same ids, another platform
+    # A group alice writes in never gets the verdict about her direct chat.
+    assert turn(session_id="tg-3", platform="telegram", sender="alice") == []
     assert turn(session_id="api-1", platform="api_server") == ["for an api client"]
-    assert turn(session_id="tg-3", platform="telegram", sender="alice") == ["for alice"]
-    store.add_notice(None, "for alice again", store.Origin("tg-1", "telegram", "alice"))
+    assert turn(session_id="tg-4", platform="telegram", sender="alice") == ["for alice"]
+    store.add_notice(None, "for alice again", store.Origin("tg-1", "telegram", "alice", "dm-alice"))
     # A notice nobody else can be told goes to the owner's own clients, never someone else's chat.
     assert turn(session_id="tui-1", platform="tui") == ["for the owner", "origin unknown"]
     assert turn(Ctx(surface="desktop"), session_id="", platform="") == []
@@ -212,25 +216,26 @@ def test_a_notice_reaches_only_its_session_or_the_same_sender():
 
 
 def test_who_a_notice_is_for_comes_from_the_session_record(monkeypatch):
-    records = {"tg": ("telegram", "42"), "desk": ("local", "nous-account"), "old": ("tui", None),
-               "cron": ("cron", None)}
+    records = {"tg": ("telegram", "42", "dm-42"), "tg-group": ("telegram", "42", "group-1"),
+               "desk": ("local", "nous-account", None), "old": ("tui", None, None), "cron": ("cron", None, None)}
 
     def session_origin(session_id):
         if session_id == "broken":
             raise sqlite3.OperationalError("database is locked")
-        return records.get(session_id, (None, None))
+        return records.get(session_id, (None, None, None))
 
     monkeypatch.setattr(auto.mining, "session_origin", session_origin)
-    assert auto.origin("tg") == store.Origin("tg", "telegram", "42")
+    assert auto.origin("tg") == store.Origin("tg", "telegram", "42", "dm-42")
     # A local client's label (Desktop stamps an account) is not a sender to look for elsewhere.
     assert auto.origin("desk") == store.Origin("desk", store.LOCAL, None)
     assert auto.origin("old") == store.Origin("old", store.LOCAL, None)
     assert auto.origin("cron") == store.Origin("cron", "cron", None)
     assert auto.origin("broken") == store.Origin("broken", None, None)
     assert auto.origin("") == store.Origin(None, None, None)
-    # One notice per audience: each sender, and the owner once.
-    assert auto.origins(["desk", "old", "tg", "cron"]) == [store.Origin("desk", store.LOCAL, None),
-                                                          store.Origin("tg", "telegram", "42")]
+    # One notice per audience: each sender in each chat, and the owner once.
+    assert auto.origins(["desk", "old", "tg", "tg-group", "cron"]) == [
+        store.Origin("desk", store.LOCAL, None), store.Origin("tg", "telegram", "42", "dm-42"),
+        store.Origin("tg-group", "telegram", "42", "group-1")]
 
 
 def test_a_runner_that_cannot_start_never_stops_notices(monkeypatch):
@@ -270,6 +275,12 @@ def test_a_notice_never_says_a_hidden_skill_is_available():
     assert "quarantine an earlier trial set" in lifted and "still hidden" in lifted
 
 
+def test_every_command_in_a_harmful_verdicts_notice_names_the_model():
+    text = auto.notice("csv-totals", outcome(scoring.HURTS), {"verdict": "granted", "reason": "it no longer hurts"})
+    for command in ("release", "appeal show", "appeal apply"):
+        assert f"`hermes court {command} csv-totals --model {MODEL}`" in text
+
+
 def test_a_trial_the_judge_could_not_decide_names_the_judge_error():
     assert "Add tasks" in auto.notice("csv-totals", outcome(scoring.INCONCLUSIVE, sources={}))
     trial_id = store.start_trial("csv-totals", "h", MODEL, auto=True)
@@ -302,7 +313,7 @@ def queue(*sessions):
 
 def test_the_runner_addresses_each_verdict_to_whoever_changed_the_skill(runner, monkeypatch):
     monkeypatch.setattr(auto.mining, "session_origin",
-                        {"tg-1": ("telegram", "42"), "cli-1": ("local", None)}.get)
+                        {"tg-1": ("telegram", "42", "dm-42"), "cli-1": ("local", None, None)}.get)
     monkeypatch.setattr(cli, "_auto_tasks", lambda *_: [store.Task(1, "csv-totals", "Total it", None, "mined", None)])
 
     def try_skills(_source, _library, selected, *_args, after, **_kwargs):
@@ -314,8 +325,8 @@ def test_the_runner_addresses_each_verdict_to_whoever_changed_the_skill(runner, 
     monkeypatch.setattr(cli, "_try_skills", try_skills)
     queue("tg-1", "cli-1")
     assert runner() == 0
-    assert sorted((n["session_id"], n["platform"], n["sender"]) for n in store.notices(10)) == [
-        ("cli-1", store.LOCAL, None), ("tg-1", "telegram", "42")]
+    assert sorted((n["session_id"], n["platform"], n["sender"], n["chat_id"]) for n in store.notices(10)) == [
+        ("cli-1", store.LOCAL, None, None), ("tg-1", "telegram", "42", "dm-42")]
     assert {r["state"] for r in rows()} == {"done"}
 
 
@@ -337,7 +348,7 @@ def test_an_unexpected_runner_failure_closes_the_change_and_says_so(runner, monk
         raise sqlite3.DatabaseError("database disk image is malformed")
 
     monkeypatch.setattr(cli, "_auto_tasks", broken)
-    monkeypatch.setattr(auto.mining, "session_origin", lambda _session: ("telegram", "42"))
+    monkeypatch.setattr(auto.mining, "session_origin", lambda _session: ("telegram", "42", "dm-42"))
     queue("tg-1")
     assert runner() == 1
     [row] = rows()

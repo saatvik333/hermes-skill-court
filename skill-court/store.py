@@ -166,6 +166,10 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
             cost_usd REAL
         )""",
     ),
+    # 5: the chat a notice's session ran in, so a verdict from a direct chat never reaches a group.
+    (
+        "ALTER TABLE notices ADD COLUMN chat_id TEXT",
+    ),
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -384,13 +388,14 @@ def decide_appeal(appeal_id: int, trial_id: int, verdict: str, reason: str) -> N
                      (trial_id, verdict, reason, appeal_id))
 
 
-def latest_appeal(skill: str, model: str | None = None) -> dict | None:
-    """The newest appeal of ``skill`` (for ``model``, when given)."""
+def latest_appeal(skill: str, model: str | None = None, applied: bool = False) -> dict | None:
+    """The newest appeal of ``skill`` (for ``model``, when given; only an applied one with ``applied``)."""
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM appeals WHERE skill = ? AND (? IS NULL OR model = ?) ORDER BY id DESC LIMIT 1",
-            (skill, model, model),
+            "SELECT * FROM appeals WHERE skill = ? AND (? IS NULL OR model = ?)"
+            " AND (NOT ? OR applied_at IS NOT NULL) ORDER BY id DESC LIMIT 1",
+            (skill, model, model, applied),
         ).fetchone()
     return dict(row) if row else None
 
@@ -404,12 +409,25 @@ def latest_appeals() -> list[dict]:
             " WHERE b.skill = a.skill AND b.model = a.model) ORDER BY a.skill, a.model")]
 
 
-def set_applied(appeal_id: int, applied: bool, lifted: str | None = None) -> None:
-    """Record that the draft was written to the live skill (``lifted``: the quarantine reason that
-    applying it removed), or that undo put the original back."""
+def claim_apply(appeal_id: int) -> bool:
+    """Mark the draft as written to the live skill; False when it already is, so two processes
+    never both write it."""
     with closing(_connect()) as conn, conn:
-        conn.execute("UPDATE appeals SET applied_at = ?, lifted = ? WHERE id = ?",
-                     (_now() if applied else None, lifted, appeal_id))
+        return conn.execute("UPDATE appeals SET applied_at = ?, lifted = NULL WHERE id = ? AND applied_at IS NULL",
+                            (_now(), appeal_id)).rowcount == 1
+
+
+def release_apply(appeal_id: int) -> bool:
+    """Mark the draft as no longer written to the live skill; False when it was not."""
+    with closing(_connect()) as conn, conn:
+        return conn.execute("UPDATE appeals SET applied_at = NULL, lifted = NULL WHERE id = ? AND applied_at IS NOT NULL",
+                            (appeal_id,)).rowcount == 1
+
+
+def set_lifted(appeal_id: int, lifted: str) -> None:
+    """The quarantine reason applying the draft removed, which undo restores."""
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE appeals SET lifted = ? WHERE id = ?", (lifted, appeal_id))
 
 
 # --- automatic trials -------------------------------------------------------------------------
@@ -593,32 +611,42 @@ LOCAL = "local"
 @dataclass(frozen=True)
 class Origin:
     """Who a notice is for: the session whose change it is about, and that session's platform
-    (``LOCAL`` for the owner's own clients, None when unknown) and sender. A None sender means the
-    profile owner, the only one a notice is posted to besides a known sender."""
+    (``LOCAL`` for the owner's own clients, None when unknown), sender and chat. A None sender means
+    the profile owner, the only one a notice is posted to besides a known sender in a known chat."""
     session_id: str | None
     platform: str | None
     sender: str | None
+    chat_id: str | None = None
 
 
 def add_notice(trial_id: int | None, text: str, origin: Origin) -> None:
     with closing(_connect()) as conn, conn:
         conn.execute(
-            "INSERT INTO notices (trial_id, text, created_at, session_id, platform, sender) VALUES (?, ?, ?, ?, ?, ?)",
-            (trial_id, text, _now(), origin.session_id, origin.platform, origin.sender))
+            "INSERT INTO notices (trial_id, text, created_at, session_id, platform, sender, chat_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (trial_id, text, _now(), origin.session_id, origin.platform, origin.sender, origin.chat_id))
 
 
-def claim_notices(session_id: str, platform: str, sender: str, local: bool) -> list[tuple[int, str]]:
-    """Take the undelivered notices for a turn of ``session_id`` (``local``: on one of the owner's
-    own clients): those about that session, those for the same sender on the same platform, and on
-    a local client those for the owner. Taking them first means two sessions starting a turn at
-    once never both post one."""
+def has_notices_for(platform: str, sender: str) -> bool:
+    """Whether an undelivered notice waits for ``sender`` on ``platform``."""
+    with closing(_connect()) as conn:
+        return conn.execute("SELECT 1 FROM notices WHERE delivered_at IS NULL AND platform = ? AND sender = ? LIMIT 1",
+                            (platform, sender)).fetchone() is not None
+
+
+def claim_notices(session_id: str, platform: str, sender: str, chat_id: str | None,
+                  local: bool) -> list[tuple[int, str]]:
+    """Take the undelivered notices for a turn of ``session_id`` in ``chat_id`` (``local``: on one
+    of the owner's own clients): those about that session, those for the same sender in the same
+    chat on the same platform, and on a local client those for the owner. Taking them first means
+    two sessions starting a turn at once never both post one."""
     with closing(_connect()) as conn, conn:
         rows = conn.execute(
             "UPDATE notices SET delivered_at = ? WHERE delivered_at IS NULL AND ("
             " (? != '' AND session_id = ?)"
-            " OR (NOT ? AND ? != '' AND platform = ? AND sender = ?)"
+            " OR (NOT ? AND ? != '' AND ? IS NOT NULL AND platform = ? AND sender = ? AND chat_id = ?)"
             " OR (? AND sender IS NULL)) RETURNING id, text",
-            (_now(), session_id, session_id, local, sender, platform, sender, local),
+            (_now(), session_id, session_id, local, sender, chat_id, platform, sender, chat_id, local),
         ).fetchall()
     return sorted(rows)
 
