@@ -94,7 +94,8 @@ def _verdicts() -> dict:
     quarantine = [{"skill": s, "model": m, "reason": r, "since": c} for s, m, r, c in store.quarantine_entries()]
     settings = store.auto_settings()
     auto = {"enabled": settings.enabled, "daily_budget_usd": settings.daily_budget_usd,
-            "spent_today_usd": store.auto_spent_today()}
+            "spent_today_usd": store.auto_spent_today(), "daily_judge_tokens": settings.daily_judge_tokens,
+            "judge_tokens_today": store.auto_judge_tokens_today()}
     return {"verdicts": rows, "quarantine": quarantine, "auto": auto, "appeals": _appeals(library)}
 
 

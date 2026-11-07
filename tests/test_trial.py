@@ -1,0 +1,51 @@
+import pytest
+
+from skill_court import scoring, store, trial
+from skill_court.arms import Arms
+from skill_court.judge import Judge
+from skill_court.runner import RunResult
+from skill_court.skills import Skill
+
+MODEL = "claude-sonnet-5-5"
+
+
+class ChangedSkill(Skill):
+    def content_hash(self) -> str:
+        return "the agent's latest version"
+
+
+@pytest.fixture
+def skill(hermes_home, monkeypatch):
+    path = hermes_home / "skills" / "csv-totals"
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text("---\nname: csv-totals\n---\n- Amounts are in dollars unless the file says cents.\n")
+    for n in (1, 2, 3):
+        store.add_task("csv-totals", f"Total export {n}", "test -f /workspace/total.txt", "manual")
+    # Every replay passes its check on the same tokens: the changed skill no longer hurts.
+    monkeypatch.setattr(trial.runner, "replay", lambda *_args, **_kwargs: RunResult(
+        model=MODEL, completed=True, passed=True, tokens=1_000, cost_usd=0.01))
+    return ChangedSkill("csv-totals", path, "agent")
+
+
+def run(skill, *, auto, apply=True):
+    return trial.run(skill, store.tasks_for(skill.name), Arms("default", {"with": "w", "without": "wo"}), MODEL,
+                     trial.Options(apply=apply), trial.Budget(5.0, False), lambda _line: None, Judge(None), auto=auto)
+
+
+def test_a_changed_skill_that_no_longer_hurts_gets_the_courts_quarantine_lifted(skill):
+    store.quarantine(skill.name, MODEL, f"{store.COURT_REASON}4: success fell from 100% to 0%")
+    store.quarantine(skill.name, "other-model", f"{store.COURT_REASON}5: success fell")
+    outcome = run(skill, auto=True)
+    assert outcome.score.verdict == scoring.NEUTRAL and outcome.released
+    assert store.hidden_for(MODEL) == {}
+    assert skill.name in store.hidden_for("other-model")  # judged only for the model that ran
+
+
+def test_a_quarantine_set_by_hand_or_a_manual_trial_keeps_the_skill_hidden(skill):
+    store.quarantine(skill.name, MODEL, "quarantined manually")
+    assert not run(skill, auto=True).released
+    assert store.hidden_for(MODEL) == {skill.name: "quarantined manually"}
+    store.quarantine(skill.name, MODEL, f"{store.COURT_REASON}4: success fell")
+    assert not run(skill, auto=False).released  # a manual trial only ever adds quarantines
+    assert not run(skill, auto=True, apply=False).released  # an appeal's draft trial changes none
+    assert skill.name in store.hidden_for(MODEL)

@@ -1,7 +1,12 @@
 import base64
 import io
+import subprocess
 import tarfile
 
+import pytest
+
+from skill_court import runner
+from skill_court.procs import CommandError, TimedOut
 from skill_court.runner import RunResult, apply_session_row, session_containers, workspace_text
 
 SESSION = "local-" + "ab12" * 16
@@ -87,3 +92,51 @@ def test_snapshot_stays_within_its_limit_and_says_what_it_left_out():
 def test_snapshot_of_nothing_or_garbage():
     assert workspace_text(archive([])) == "(no files)"
     assert workspace_text("not base64 at all!") == "(the sandbox's files could not be read)"
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    """A replay whose run answers and leaves one sandbox; ``snapshot`` decides how reading its files
+    goes. Records every container command."""
+    commands = []
+    snapshot = {"returncode": 0, "stdout": archive([])}
+
+    def run(argv, *, timeout, check=True, **_):
+        if argv[0] == "hermes":
+            return subprocess.CompletedProcess(argv, 0, "465\n", f"session_id: {SESSION}\n")
+        commands.append(argv[1:3])
+        if argv[1] == "exec":
+            if snapshot.get("timeout"):
+                raise TimedOut(f"`docker exec …` timed out after {timeout:.0f}s", "", "")
+            proc = subprocess.CompletedProcess(argv, snapshot["returncode"], snapshot["stdout"], "Error: No such container")
+            if check and proc.returncode != 0:  # what procs.run does
+                raise CommandError(f"`docker exec …` exited {proc.returncode}: Error: No such container")
+            return proc
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(runner, "hermes_binary", lambda: "hermes")
+    monkeypatch.setattr(runner, "container_binary", lambda: "docker")
+    monkeypatch.setattr(runner, "read_session", lambda *_: True)
+    monkeypatch.setattr(runner, "_labelled_containers", lambda _profile: [("c1", SESSION[:63])])
+    return snapshot, commands
+
+
+def replay(tmp_path):
+    return runner.replay("court-1a2b3c4d-with", "Total the sales", None, workdir=tmp_path, timeout=60)
+
+
+def test_a_sandbox_that_left_no_files_is_judged_on_its_answer(sandbox, tmp_path):
+    result = replay(tmp_path)
+    assert (result.completed, result.workspace, result.error) == (True, "(no files)", None)
+    assert sandbox[1] == [["exec", "c1"], ["rm", "-f"]]
+
+
+@pytest.mark.parametrize("failure", [{"returncode": 1, "stdout": ""}, {"timeout": True}])
+def test_a_sandbox_whose_files_could_not_be_read_gives_no_outcome_and_is_still_removed(sandbox, tmp_path, failure):
+    snapshot, commands = sandbox
+    snapshot.update(failure)
+    result = replay(tmp_path)
+    assert result.completed is None and result.workspace is None
+    assert "could not be read" in result.error
+    assert commands == [["exec", "c1"], ["rm", "-f"]]

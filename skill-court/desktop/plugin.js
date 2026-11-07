@@ -323,7 +323,7 @@ function Summary({ verdicts, quarantine, auto }) {
       }),
       jsx('p', {
         children: auto?.enabled
-          ? `Automatic trials are on: ${usd(auto.spent_today_usd)} of ${usd(auto.daily_budget_usd)} spent on replays today.`
+          ? `Automatic trials are on: ${usd(auto.spent_today_usd)} of ${usd(auto.daily_budget_usd)} spent today; the judge used ${(auto.judge_tokens_today ?? 0).toLocaleString()} of ${(auto.daily_judge_tokens ?? 0).toLocaleString()} tokens.`
           : 'Automatic trials are off. Turn them on with `hermes court auto on`.'
       }),
       judged

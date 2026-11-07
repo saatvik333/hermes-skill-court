@@ -63,6 +63,7 @@ class Outcome:
     model: str
     score: scoring.Score
     quarantined: bool
+    released: bool  # an automatic trial lifted the quarantine an earlier trial set for this model
     sources: dict[str, int]  # pairs with an outcome in both arms, by where it came from: check or judge
     failed_with: int  # tasks solved without the skill (every rep) that failed with it (every rep)
     solved_without: int
@@ -244,9 +245,13 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
     if cause is not None:
         store.set_cause(trial_id, cause, quote, evidence)
 
-    quarantined = False
+    quarantined = released = False
     if opts.apply and score.verdict == scoring.HURTS:
-        store.quarantine(skill.name, model, f"Skill Court trial #{trial_id}: {score.reason}")
+        store.quarantine(skill.name, model, f"{store.COURT_REASON}{trial_id}: {score.reason}")
         quarantined = True
-    return Outcome(trial_id, model, score, quarantined, dict(sources), failed_with, solved_without,
+    elif opts.apply and auto and score.verdict in (scoring.HELPS, scoring.NEUTRAL):
+        # An automatic trial runs because the skill changed: the version an earlier trial hid is gone,
+        # and this one does not hurt. A quarantine set by hand stays.
+        released = store.release_court_quarantine(skill.name, model)
+    return Outcome(trial_id, model, score, quarantined, released, dict(sources), failed_with, solved_without,
                    cause, quote, judge_tokens)

@@ -20,6 +20,8 @@ PLUGIN = "skill-court"
 ANY_MODEL = "*"
 # The plugin-data file a running trial holds an exclusive lock on, so one profile runs one at a time.
 TRIAL_LOCK = "trial.lock"
+# How the reason of a quarantine a trial set starts: ``Skill Court trial #<id>: <why>``.
+COURT_REASON = "Skill Court trial #"
 
 _MIGRATIONS: tuple[tuple[str, ...], ...] = (
     # 1: quarantine, tasks, trials and their runs.
@@ -142,6 +144,28 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
             lifted            TEXT
         )""",
     ),
+    # 4: who a notice is for, retry backoff for automatic trials, and the judge's daily token cap.
+    (
+        # The session whose change led to the notice, its platform (``local`` for the profile
+        # owner's own clients) and its sender; a NULL sender means the profile owner.
+        "ALTER TABLE notices ADD COLUMN session_id TEXT",
+        "ALTER TABLE notices ADD COLUMN platform TEXT",
+        "ALTER TABLE notices ADD COLUMN sender TEXT",
+        # When a background runner was last started for the row.
+        "ALTER TABLE auto_queue ADD COLUMN last_attempt_at TEXT",
+        # NULL: the default cap.
+        "ALTER TABLE auto_settings ADD COLUMN daily_judge_tokens INTEGER",
+        # Every call to the judge (comparisons, causes, drafts), with what the host reported it used.
+        """CREATE TABLE judge_calls (
+            id       INTEGER PRIMARY KEY,
+            at       TEXT NOT NULL,
+            auto     INTEGER NOT NULL,
+            purpose  TEXT NOT NULL,
+            model    TEXT,
+            tokens   INTEGER NOT NULL,
+            cost_usd REAL
+        )""",
+    ),
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -195,6 +219,15 @@ def release(skill: str, model: str | None) -> int:
         else:
             cur = conn.execute("DELETE FROM quarantine WHERE skill = ? AND model = ?", (skill, model))
         return cur.rowcount
+
+
+def release_court_quarantine(skill: str, model: str) -> bool:
+    """Lift ``skill``'s quarantine for ``model`` if a trial set it; one set by hand stays."""
+    with closing(_connect()) as conn, conn:
+        return conn.execute(
+            "DELETE FROM quarantine WHERE skill = ? AND model = ? AND substr(reason, 1, ?) = ?",
+            (skill, model, len(COURT_REASON), COURT_REASON),
+        ).rowcount == 1
 
 
 def hidden_for(model: str) -> dict[str, str]:
@@ -388,35 +421,42 @@ class AutoSettings:
     # A change counts as finished this long after the agent last touched the skill, when the
     # session that made it has not ended by then.
     quiet_minutes: float
+    # Tokens a day the judge may use in automatic trials (comparisons, causes and drafts).
+    daily_judge_tokens: int
 
 
-AUTO_DEFAULTS = AutoSettings(enabled=False, daily_budget_usd=2.0, quiet_minutes=15.0)
+AUTO_DEFAULTS = AutoSettings(enabled=False, daily_budget_usd=2.0, quiet_minutes=15.0, daily_judge_tokens=300_000)
 
 
 def auto_settings() -> AutoSettings:
     with closing(_connect()) as conn:
-        row = conn.execute("SELECT enabled, daily_budget_usd, quiet_minutes FROM auto_settings").fetchone()
-    return AUTO_DEFAULTS if row is None else AutoSettings(bool(row[0]), row[1], row[2])
+        row = conn.execute(
+            "SELECT enabled, daily_budget_usd, quiet_minutes, daily_judge_tokens FROM auto_settings").fetchone()
+    if row is None:
+        return AUTO_DEFAULTS
+    return AutoSettings(bool(row[0]), row[1], row[2], AUTO_DEFAULTS.daily_judge_tokens if row[3] is None else row[3])
 
 
 def set_auto_settings(settings: AutoSettings) -> None:
     with closing(_connect()) as conn, conn:
         conn.execute(
-            "INSERT INTO auto_settings (id, enabled, daily_budget_usd, quiet_minutes) VALUES (1, ?, ?, ?)"
-            " ON CONFLICT (id) DO UPDATE SET enabled = excluded.enabled,"
-            " daily_budget_usd = excluded.daily_budget_usd, quiet_minutes = excluded.quiet_minutes",
-            (int(settings.enabled), settings.daily_budget_usd, settings.quiet_minutes),
+            "INSERT INTO auto_settings (id, enabled, daily_budget_usd, quiet_minutes, daily_judge_tokens)"
+            " VALUES (1, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET enabled = excluded.enabled,"
+            " daily_budget_usd = excluded.daily_budget_usd, quiet_minutes = excluded.quiet_minutes,"
+            " daily_judge_tokens = excluded.daily_judge_tokens",
+            (int(settings.enabled), settings.daily_budget_usd, settings.quiet_minutes, settings.daily_judge_tokens),
         )
 
 
 def queue_change(skill: str, session_id: str) -> None:
     """The agent created or changed ``skill`` in ``session_id``: (re)start its wait for a trial.
-    A change during a running trial makes that trial's result stale for this row, so it waits again."""
+    A change during a running trial makes that trial's result stale for this row, so it waits again;
+    a new change is tried as soon as it is ready, whenever an earlier one was last attempted."""
     with closing(_connect()) as conn, conn:
         conn.execute(
             "INSERT INTO auto_queue (skill, session_id, state, changed_at) VALUES (?, ?, 'pending', ?)"
             " ON CONFLICT (skill, session_id) DO UPDATE SET state = 'pending', changed_at = excluded.changed_at,"
-            " ended_at = NULL, trial_id = NULL, note = NULL",
+            " ended_at = NULL, trial_id = NULL, note = NULL, last_attempt_at = NULL",
             (skill, session_id, _now()),
         )
 
@@ -430,14 +470,16 @@ def end_session(session_id: str) -> int:
         ).rowcount
 
 
-def claim_ready(quiet_before: str) -> list[str]:
-    """Mark pending changes whose session ended, or that have been quiet since ``quiet_before``
-    (UTC ISO), as queued for the background runner; returns their skills."""
+def claim_ready(quiet_before: str, retry_before: str) -> list[str]:
+    """Mark pending changes whose session ended, or that have been quiet since ``quiet_before``,
+    as queued for the background runner, except those a runner was started for after
+    ``retry_before`` (both UTC ISO); returns their skills."""
     with closing(_connect()) as conn, conn:
         rows = conn.execute(
             "UPDATE auto_queue SET state = 'queued' WHERE state = 'pending'"
-            " AND (ended_at IS NOT NULL OR changed_at <= ?) RETURNING skill",
-            (quiet_before,),
+            " AND (ended_at IS NOT NULL OR changed_at <= ?)"
+            " AND (last_attempt_at IS NULL OR last_attempt_at <= ?) RETURNING skill",
+            (quiet_before, retry_before),
         ).fetchall()
     return sorted({skill for (skill,) in rows})
 
@@ -454,13 +496,14 @@ def start_queued() -> dict[str, list[str]]:
     return claimed
 
 
-def finish_queued(skill: str, trial_id: int | None, note: str) -> None:
-    """Close the running rows of ``skill``; a row the agent changed again meanwhile stays pending."""
+def finish_queued(skill: str, trial_id: int | None, note: str) -> int:
+    """Close the running rows of ``skill``; a row the agent changed again meanwhile stays pending.
+    Returns how many rows it closed."""
     with closing(_connect()) as conn, conn:
-        conn.execute(
+        return conn.execute(
             "UPDATE auto_queue SET state = 'done', trial_id = ?, note = ? WHERE skill = ? AND state = 'running'",
             (trial_id, note, skill),
-        )
+        ).rowcount
 
 
 def defer_queued(skill: str, note: str) -> None:
@@ -477,26 +520,56 @@ def requeue_orphans() -> int:
         return conn.execute("UPDATE auto_queue SET state = 'queued' WHERE state = 'running'").rowcount
 
 
-def unfinished() -> int:
-    """Queued or running changes: work a background runner owns, or should."""
+def unfinished(attempted_before: str) -> int:
+    """Queued or running changes, work a background runner owns or should, whose last runner was
+    started before ``attempted_before`` (UTC ISO), or never."""
     with closing(_connect()) as conn:
-        return conn.execute("SELECT COUNT(*) FROM auto_queue WHERE state IN ('queued', 'running')").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM auto_queue WHERE state IN ('queued', 'running')"
+            " AND (last_attempt_at IS NULL OR last_attempt_at <= ?)",
+            (attempted_before,),
+        ).fetchone()[0]
 
 
-def auto_queue_rows() -> list[dict]:
+def mark_attempt(at: str, note: str | None = None) -> None:
+    """A background runner was started (or, with ``note``, failed to start) at ``at`` for every
+    queued or running change."""
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE auto_queue SET last_attempt_at = ?, note = COALESCE(?, note)"
+                     " WHERE state IN ('queued', 'running')", (at, note))
+
+
+def auto_queue_rows(limit: int) -> list[dict]:
+    """The ``limit`` most recently changed rows."""
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM auto_queue ORDER BY changed_at DESC, skill")]
+        return [dict(r) for r in conn.execute("SELECT * FROM auto_queue ORDER BY changed_at DESC, skill LIMIT ?",
+                                              (limit,))]
+
+
+def record_judge_call(purpose: str, model: str, tokens: int, cost_usd: float | None, auto: bool) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("INSERT INTO judge_calls (at, auto, purpose, model, tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
+                     (_now(), int(auto), purpose, model, tokens, cost_usd))
 
 
 def auto_spent_since(since: str) -> float:
-    """Provider-reported replay spend of automatic trials started at or after ``since`` (UTC ISO)."""
+    """Provider-reported spend of automatic trials since ``since`` (UTC ISO): the replays of trials
+    started since then, and the judge calls made since then that the host priced."""
     with closing(_connect()) as conn:
         return conn.execute(
-            "SELECT COALESCE(SUM(r.cost_usd), 0) FROM runs r JOIN trials t ON t.id = r.trial_id"
-            " WHERE t.auto = 1 AND t.started_at >= ?",
-            (since,),
+            "SELECT (SELECT COALESCE(SUM(r.cost_usd), 0) FROM runs r JOIN trials t ON t.id = r.trial_id"
+            " WHERE t.auto = 1 AND t.started_at >= ?)"
+            " + (SELECT COALESCE(SUM(cost_usd), 0) FROM judge_calls WHERE auto = 1 AND at >= ?)",
+            (since, since),
         ).fetchone()[0]
+
+
+def auto_judge_tokens_since(since: str) -> int:
+    """Tokens the judge used in automatic trials since ``since`` (UTC ISO)."""
+    with closing(_connect()) as conn:
+        return conn.execute("SELECT COALESCE(SUM(tokens), 0) FROM judge_calls WHERE auto = 1 AND at >= ?",
+                            (since,)).fetchone()[0]
 
 
 def day_start(now: datetime) -> str:
@@ -509,16 +582,43 @@ def auto_spent_today(now: datetime | None = None) -> float:
     return auto_spent_since(day_start(now or datetime.now(timezone.utc)))
 
 
-def add_notice(trial_id: int | None, text: str) -> None:
+def auto_judge_tokens_today(now: datetime | None = None) -> int:
+    return auto_judge_tokens_since(day_start(now or datetime.now(timezone.utc)))
+
+
+# The platform of a notice for a session on one of the profile owner's own clients.
+LOCAL = "local"
+
+
+@dataclass(frozen=True)
+class Origin:
+    """Who a notice is for: the session whose change it is about, and that session's platform
+    (``LOCAL`` for the owner's own clients, None when unknown) and sender. A None sender means the
+    profile owner, the only one a notice is posted to besides a known sender."""
+    session_id: str | None
+    platform: str | None
+    sender: str | None
+
+
+def add_notice(trial_id: int | None, text: str, origin: Origin) -> None:
     with closing(_connect()) as conn, conn:
-        conn.execute("INSERT INTO notices (trial_id, text, created_at) VALUES (?, ?, ?)", (trial_id, text, _now()))
+        conn.execute(
+            "INSERT INTO notices (trial_id, text, created_at, session_id, platform, sender) VALUES (?, ?, ?, ?, ?, ?)",
+            (trial_id, text, _now(), origin.session_id, origin.platform, origin.sender))
 
 
-def claim_notices() -> list[tuple[int, str]]:
-    """Take the undelivered notices, so two sessions starting a turn at once never both post one."""
+def claim_notices(session_id: str, platform: str, sender: str, local: bool) -> list[tuple[int, str]]:
+    """Take the undelivered notices for a turn of ``session_id`` (``local``: on one of the owner's
+    own clients): those about that session, those for the same sender on the same platform, and on
+    a local client those for the owner. Taking them first means two sessions starting a turn at
+    once never both post one."""
     with closing(_connect()) as conn, conn:
         rows = conn.execute(
-            "UPDATE notices SET delivered_at = ? WHERE delivered_at IS NULL RETURNING id, text", (_now(),)
+            "UPDATE notices SET delivered_at = ? WHERE delivered_at IS NULL AND ("
+            " (? != '' AND session_id = ?)"
+            " OR (NOT ? AND ? != '' AND platform = ? AND sender = ?)"
+            " OR (? AND sender IS NULL)) RETURNING id, text",
+            (_now(), session_id, session_id, local, sender, platform, sender, local),
         ).fetchall()
     return sorted(rows)
 
@@ -529,7 +629,8 @@ def unclaim_notice(notice_id: int) -> None:
         conn.execute("UPDATE notices SET delivered_at = NULL WHERE id = ?", (notice_id,))
 
 
-def notices() -> list[dict]:
+def notices(limit: int) -> list[dict]:
+    """The ``limit`` newest notices."""
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM notices ORDER BY id DESC")]
+        return [dict(r) for r in conn.execute("SELECT * FROM notices ORDER BY id DESC LIMIT ?", (limit,))]

@@ -2,7 +2,8 @@
 
 A task is the user message that led the agent to call ``skill_view`` on a skill: the request the
 skill was loaded to serve. For an automatic trial, the tasks also include the requests of the
-session in which the agent wrote the skill. History is read through the public, read-only ``SessionDB``.
+session in which the agent wrote the skill, and that session's platform and sender decide who is
+told the verdict. History is read through the public, read-only ``SessionDB``.
 """
 
 from __future__ import annotations
@@ -96,6 +97,24 @@ def session_requests(session_id: str) -> list[str]:
         return requests_in_session(db.get_messages(session_id))
     finally:
         db.close()
+
+
+def session_origin(session_id: str) -> tuple[str | None, str | None]:
+    """``(source, user_id)`` Hermes stored for one session of the active profile: the platform or
+    client it ran on and its sender. Nones when the session is not stored or a field is empty."""
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    if not session_id or not (get_hermes_home() / "state.db").exists():
+        return None, None
+    db = SessionDB(read_only=True)
+    try:
+        row = db.get_session(session_id)
+    finally:
+        db.close()
+    if not row:
+        return None, None
+    return row.get("source") or None, row.get("user_id") or None
 
 
 def mine(wanted: Iterable[str] | None, per_skill: int) -> dict[str, list[MinedTask]]:

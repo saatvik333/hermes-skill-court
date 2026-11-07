@@ -97,10 +97,14 @@ def workspace_text(archive_b64: str, limit: int = SNAPSHOT_CHARS) -> str:
 
 
 def _snapshot(container: str, minutes: int) -> str:
+    """The run's files for the judge. Raises ``CommandError`` (``TimedOut`` past the check timeout)
+    when they could not be read, so a failed read is never taken for a run that left no files."""
     roots = " ".join(SNAPSHOT_ROOTS)
-    script = (f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
+    script = ("command -v tar >/dev/null && command -v base64 >/dev/null"
+              " || { echo 'tar or base64 is missing' >&2; exit 127; }; "
+              f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
               f" | head -n {SNAPSHOT_FILES} | tar -cf - -T - 2>/dev/null | base64")
-    proc = run([container_binary(), "exec", container, "sh", "-c", script], timeout=CHECK_TIMEOUT, check=False)
+    proc = run([container_binary(), "exec", container, "sh", "-c", script], timeout=CHECK_TIMEOUT)
     return workspace_text(proc.stdout) if proc.stdout.strip() else "(no files)"
 
 
@@ -218,6 +222,7 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     responded = read_session(profile, result.session_id, result)
     # The gateway may not have flushed token counters yet; a completed turn with an answer did respond.
     responded = responded or (result.exit_code == 0 and bool(stdout.strip()))
+    container = None
     try:
         matches = session_containers(profile, result.session_id, _labelled_containers(profile))
         container = matches[0] if len(matches) == 1 else None
@@ -242,13 +247,22 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
                     result.passed = False
                     result.error = "no sandbox was created, so the check found nothing to verify"
             elif container is not None:
-                result.workspace = _snapshot(container, math.ceil((time.monotonic() - started) / 60) + 1)
+                try:
+                    result.workspace = _snapshot(container, math.ceil((time.monotonic() - started) / 60) + 1)
+                except CommandError as exc:
+                    # The judge would weigh this run's missing files against the other run's files.
+                    result.completed = None
+                    result.error = f"its sandbox's files could not be read, so it has no outcome: {exc}"
             elif matches:
                 result.workspace = f"({len(matches)} sandboxes carry this session's label; none was read)"
             else:
                 result.workspace = "(the run opened no sandbox, so it left no files)"
-        if container is not None:
-            run([container_binary(), "rm", "-f", container], timeout=60, check=False)
     except CommandError as exc:
         result.error = str(exc)
+    finally:
+        if container is not None:
+            try:
+                run([container_binary(), "rm", "-f", container], timeout=60, check=False)
+            except CommandError as exc:  # the trial's cleanup removes the profile's sandboxes again
+                result.error = result.error or f"its sandbox was not removed: {exc}"
     return result

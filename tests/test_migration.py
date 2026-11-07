@@ -45,6 +45,29 @@ def test_a_1_0_database_is_upgraded_in_place_with_its_data(hermes_home):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
 
 
+def test_a_1_1_database_keeps_its_settings_queue_and_notices(hermes_home):
+    path = hermes_home / "plugin-data" / store.PLUGIN / "data.db"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:  # the schema the three steps released with 1.1 create
+        for step in store._MIGRATIONS[:3]:
+            for statement in step:
+                conn.execute(statement)
+        conn.executescript("""
+            INSERT INTO auto_settings VALUES (1, 1, 5.0, 10.0);
+            INSERT INTO auto_queue (skill, session_id, state, changed_at) VALUES ('s', 'sess', 'queued', '2026-11-08T00:00:00+00:00');
+            INSERT INTO notices (text, created_at) VALUES ('an old verdict', '2026-11-08T00:00:00+00:00');
+            PRAGMA user_version = 3;
+        """)
+
+    assert store.auto_settings() == store.AutoSettings(True, 5.0, 10.0, store.AUTO_DEFAULTS.daily_judge_tokens)
+    assert [(r["skill"], r["state"], r["last_attempt_at"]) for r in store.auto_queue_rows(5)] == [("s", "queued", None)]
+    # A notice from before origins were recorded goes to the owner's own clients only.
+    assert store.claim_notices("tg-1", "telegram", "42", local=False) == []
+    assert [text for _id, text in store.claim_notices("cli-1", "cli", "", local=True)] == ["an old verdict"]
+    assert store.auto_judge_tokens_today() == 0
+
+
+
 def test_a_new_database_gets_the_whole_schema():
     store.queue_change("s", "sess")
     assert store.auto_settings() == store.AUTO_DEFAULTS

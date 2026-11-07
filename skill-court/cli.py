@@ -18,6 +18,9 @@ from . import appeal, arms, auto, mining, scoring, skills, store, trial
 from .judge import TASK as JUDGE_TASK, Judge
 from .procs import CommandError, container_binary, run
 
+# ``auto status`` lists at most this many queued changes and this many notices, newest first.
+STATUS_ROWS = 20
+
 
 def _positive(kind: Callable[[str], float]) -> Callable[[str], float]:
     def parse(raw: str):
@@ -49,7 +52,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
     t.add_argument("--keep-sandboxes", action="store_true", help="Keep the replay profiles afterwards")
     t.add_argument("--auto", action="store_true",
                    help="Run the automatic-trial queue (what auto mode starts in the background): it spends "
-                        "from the daily budget instead of --budget and always quarantines a harmful skill")
+                        "from the daily budget and judge tokens instead of --budget, always quarantines a harmful "
+                        "skill, and lifts a trial's quarantine from a changed skill that no longer hurts")
 
     subs.add_parser("report", help="Latest verdict per skill and model")
 
@@ -79,8 +83,12 @@ def setup(parser: argparse.ArgumentParser) -> None:
     on.add_argument("--quiet-minutes", type=_positive(float),
                     help="Start once the agent has left a skill unchanged this long, if its session is still open "
                          f"(default {store.AUTO_DEFAULTS.quiet_minutes:g}, or the last value set)")
+    on.add_argument("--judge-tokens", type=_positive(int),
+                    help="Tokens a day the judge may use in automatic trials "
+                         f"(default {store.AUTO_DEFAULTS.daily_judge_tokens:,}, or the last value set)")
     asubs.add_parser("off", help="Turn automatic trials off")
-    asubs.add_parser("status", help="Settings, today's spend, the queue and recent notices")
+    asubs.add_parser("status", help=f"Settings, today's spend and judge tokens, the {STATUS_ROWS} latest queued "
+                                    f"changes and the {STATUS_ROWS} latest notices")
 
     tasks = subs.add_parser("tasks", help="Replay tasks per skill")
     tsubs = tasks.add_subparsers(dest="tasks_command")
@@ -192,8 +200,7 @@ def _print_results(done: list[tuple[str, trial.Outcome]], budget: trial.Budget) 
     print(f"\nSpent at least ${budget.spent:.2f} of ${budget.limit:.2f} on replays{unpriced}.")
     judged = sum(o.judge_tokens for _, o in done)
     if judged:
-        print(f"The judge ({JUDGE_TASK}) used {judged:,} tokens; Hermes does not price plugin LLM calls, "
-              "so they are not in that total.")
+        print(f"The judge ({JUDGE_TASK}) used {judged:,} tokens, which are not part of that replay spend.")
 
 
 def _cmd_trial(args: argparse.Namespace, llm: Any) -> int:
@@ -248,77 +255,109 @@ def _auto_tasks(skill: str, sessions: list[str], limit: int) -> list[store.Task]
     return store.tasks_for(skill)
 
 
+def _auto_failure(name: str, exc: BaseException) -> str:
+    detail = " ".join(f"{type(exc).__name__}: {exc}".split())[:300]
+    return (f"Skill Court: the automatic trial of `{name}` failed ({detail}). It is not retried until the agent "
+            f"changes the skill again; `hermes court trial {name}` tests it now, and Skill Court's {auto.LOG} has "
+            "the details.")
+
+
 def _run_auto_queue(args: argparse.Namespace, llm: Any) -> int:
     source = _source()
-    run([container_binary(), "version"], timeout=60)
     opts = _options(args, apply=True)
-    judge = Judge(llm)
     # Wait for a running trial instead of failing: changes queued meanwhile still get their turn.
     with _trial_lock(wait=True):
         store.requeue_orphans()
         while claimed := store.start_queued():
-            settings = store.auto_settings()
-            if not settings.enabled:
-                for name in claimed:
-                    store.defer_queued(name, "waiting: automatic trials are off")
-                print("Automatic trials are off; the queued skills wait until they are turned on again.")
-                break
-            left = settings.daily_budget_usd - store.auto_spent_today()
-            if left <= 0:
-                for name in claimed:
-                    store.defer_queued(name, "waiting for tomorrow's budget")
-                print(f"Today's ${settings.daily_budget_usd:.2f} for automatic trials is spent; "
-                      f"{len(claimed)} skill(s) wait for tomorrow.")
-                break
-            library = skills.library()
-            selected: dict[str, list[store.Task]] = {}
-            for name, sessions in claimed.items():
-                if name not in library:
-                    store.finish_queued(name, None, "the skill no longer exists")
-                    continue
-                tasks = _auto_tasks(name, sessions, opts.tasks)
-                if not tasks:
-                    store.finish_queued(name, None, "no tasks")
-                    store.add_notice(None, f"Skill Court: could not test `{name}` automatically: the session that "
-                                           "changed it has no request to replay and it has no other tasks. Add one with "
-                                           f"`hermes court tasks add {name} --prompt …`.")
-                    continue
-                selected[name] = tasks
-            if not selected:
-                continue
-
-            def close(name: str, outcome: trial.Outcome) -> None:
-                store.finish_queued(name, outcome.trial_id, outcome.score.verdict)
-                proposed = None
-                # A harmful skill with a recorded cause gets a drafted fix tried on its tasks, within
-                # the same budget. It is never applied without the user.
-                if outcome.score.verdict == scoring.HURTS and outcome.cause and not budget.exhausted:
-                    try:
-                        proposed = appeal.draft_and_try(source, library[name], outcome.model, opts, budget, judge,
-                                                        print, auto=True)
-                        print(f"  appeal #{proposed['id']}: {proposed['verdict'].upper()}: {proposed['reason']}")
-                    except Exception as exc:  # the verdict's notice goes out without a fix
-                        print(f"  appeal: none tried ({type(exc).__name__}: {exc})")
-                store.add_notice(outcome.trial_id, auto.notice(name, outcome, proposed))
-
-            budget = trial.Budget(left, allow_unpriced=False)
+            audience = {name: auto.origins(sessions) for name, sessions in claimed.items()}
             try:
-                done = _try_skills(source, library, selected, opts, budget, judge, arms.source_disabled_skills(source),
-                                   auto_mode=True, keep=False, after=close)
+                if not _auto_batch(source, claimed, audience, opts, llm):
+                    break
             except Exception as exc:
-                for name in selected:  # rows already closed are left as they are
-                    store.finish_queued(name, None, f"failed: {exc}")
+                # Closed, so a lasting failure is not retried every turn; rows already closed or put
+                # back to wait are left as they are.
+                for name in claimed:
+                    if store.finish_queued(name, None, f"failed: {exc}"):
+                        auto.notify(audience[name], None, _auto_failure(name, exc))
                 raise
-            for name in selected.keys() - {name for name, _ in done}:
-                if budget.spent >= budget.limit:
-                    store.defer_queued(name, "waiting for tomorrow's budget")
-                else:
-                    # Unpriced runs would make the daily budget meaningless; never retry them unattended.
-                    store.finish_queued(name, None, budget.why_stopped())
-                    store.add_notice(None, f"Skill Court: `{name}` was not tested automatically: {budget.why_stopped()}. "
-                                           f"Run `hermes court trial {name} --allow-unpriced` to test it yourself.")
-            _print_results(done, budget)
     return 0
+
+
+def _auto_batch(source: str, claimed: dict[str, list[str]], audience: dict[str, list[store.Origin]],
+                opts: trial.Options, llm: Any) -> bool:
+    """Try the claimed skills; False when the rest of the queue has to wait (trials are off, or
+    today's budget or judge tokens are spent)."""
+    try:
+        run([container_binary(), "version"], timeout=60)
+    except CommandError as exc:
+        for name in claimed:
+            store.defer_queued(name, f"waiting: {exc}")
+        raise
+    settings = store.auto_settings()
+    if not settings.enabled:
+        for name in claimed:
+            store.defer_queued(name, "waiting: automatic trials are off")
+        print("Automatic trials are off; the queued skills wait until they are turned on again.")
+        return False
+    left = settings.daily_budget_usd - store.auto_spent_today()
+    if left <= 0:
+        for name in claimed:
+            store.defer_queued(name, "waiting for tomorrow's budget")
+        print(f"Today's ${settings.daily_budget_usd:.2f} for automatic trials is spent; "
+              f"{len(claimed)} skill(s) wait for tomorrow.")
+        return False
+    if store.auto_judge_tokens_today() >= settings.daily_judge_tokens:
+        for name in claimed:
+            store.defer_queued(name, "waiting for tomorrow's judge tokens")
+        print(f"Today's {settings.daily_judge_tokens:,} judge tokens for automatic trials are used up; "
+              f"{len(claimed)} skill(s) wait for tomorrow.")
+        return False
+    judge = Judge(llm, settings.daily_judge_tokens)
+    library = skills.library()
+    selected: dict[str, list[store.Task]] = {}
+    for name, sessions in claimed.items():
+        if name not in library:
+            store.finish_queued(name, None, "the skill no longer exists")
+            continue
+        tasks = _auto_tasks(name, sessions, opts.tasks)
+        if not tasks:
+            store.finish_queued(name, None, "no tasks")
+            auto.notify(audience[name], None, f"Skill Court: could not test `{name}` automatically: the session that "
+                                              "changed it has no request to replay and it has no other tasks. Add one "
+                                              f"with `hermes court tasks add {name} --prompt …`.")
+            continue
+        selected[name] = tasks
+    if not selected:
+        return True
+
+    def close(name: str, outcome: trial.Outcome) -> None:
+        store.finish_queued(name, outcome.trial_id, outcome.score.verdict)
+        proposed = None
+        # A harmful skill with a recorded cause gets a drafted fix tried on its tasks, within the
+        # same budget. It is never applied without the user.
+        if outcome.score.verdict == scoring.HURTS and outcome.cause and not budget.exhausted:
+            try:
+                proposed = appeal.draft_and_try(source, library[name], outcome.model, opts, budget, judge, print,
+                                                auto=True)
+                print(f"  appeal #{proposed['id']}: {proposed['verdict'].upper()}: {proposed['reason']}")
+            except Exception as exc:  # the verdict's notice goes out without a fix
+                print(f"  appeal: none tried ({type(exc).__name__}: {exc})")
+        auto.notify(audience[name], outcome.trial_id, auto.notice(name, outcome, proposed))
+
+    budget = trial.Budget(left, allow_unpriced=False)
+    done = _try_skills(source, library, selected, opts, budget, judge, arms.source_disabled_skills(source),
+                       auto_mode=True, keep=False, after=close)
+    for name in selected.keys() - {name for name, _ in done}:
+        if budget.spent >= budget.limit:
+            store.defer_queued(name, "waiting for tomorrow's budget")
+        else:
+            # Unpriced runs would make the daily budget meaningless; never retry them unattended.
+            store.finish_queued(name, None, budget.why_stopped())
+            auto.notify(audience[name], None, f"Skill Court: `{name}` was not tested automatically: "
+                                              f"{budget.why_stopped()}. Run `hermes court trial {name} "
+                                              "--allow-unpriced` to test it yourself.")
+    _print_results(done, budget)
+    return True
 
 
 def _cmd_report() -> int:
@@ -430,7 +469,8 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         source = _source()
         run([container_binary(), "version"], timeout=60)
         settings = store.AutoSettings(True, args.budget or settings.daily_budget_usd,
-                                      args.quiet_minutes or settings.quiet_minutes)
+                                      args.quiet_minutes or settings.quiet_minutes,
+                                      args.judge_tokens or settings.daily_judge_tokens)
         store.set_auto_settings(settings)
         print(f"Automatic trials are on for profile {source}.\n"
               "After the agent creates, patches or edits a skill, Skill Court waits until that session ends "
@@ -438,9 +478,15 @@ def _cmd_auto(args: argparse.Namespace) -> int:
               "requests and the skill's other tasks with and without it, in Docker sandboxes, in the background.\n"
               f"Spending: replays stop for the day at ${settings.daily_budget_usd:.2f} of provider-reported spend "
               "(change it with --budget), and stop at once if a run reports no price. The judge's calls for tasks "
-              f"without a check (auxiliary task {JUDGE_TASK}) are not priced by Hermes and are not counted.\n"
-              "A skill that makes the model fail is hidden from that model. The verdict is posted at the start of "
-              "your next turn. Undo a quarantine with: hermes court release <skill>. Stop with: hermes court auto off")
+              f"without a check (auxiliary task {JUDGE_TASK}) may use {settings.daily_judge_tokens:,} tokens a day "
+              f"(default {store.AUTO_DEFAULTS.daily_judge_tokens:,}; change it with --judge-tokens); they count "
+              "toward the dollar budget only if Hermes reports their price.\n"
+              "A skill that hurts a model (the model succeeds less often with it, or uses at least 25% more tokens "
+              "at equal success) is hidden from that model; when the agent changes it and it no longer hurts, "
+              "that quarantine is lifted. The verdict is posted at the start of the next turn of the conversation "
+              "that changed the skill, or of the same sender's other chats on that platform; changes made in the "
+              "CLI, TUI or Desktop are posted there. Undo a quarantine with: hermes court release <skill>. "
+              "Stop with: hermes court auto off")
         return 0
     if command == "off":
         store.set_auto_settings(replace(settings, enabled=False))
@@ -449,20 +495,28 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     if command == "status":
         print(f"Automatic trials: {'on' if settings.enabled else 'off'}")
         print(f"Spent today: ${store.auto_spent_today():.2f} of ${settings.daily_budget_usd:.2f} "
-              "(replays, as reported by the provider)")
-        print(f"Starts: when the session that changed a skill ends, or after {settings.quiet_minutes:g} quiet minutes")
+              "(replays, and judge calls Hermes priced, as reported by the provider)")
+        print(f"Judge today: {store.auto_judge_tokens_today():,} of {settings.daily_judge_tokens:,} tokens")
+        print(f"Starts: when the session that changed a skill ends, or after {settings.quiet_minutes:g} quiet minutes; "
+              f"unfinished changes get a new runner at most every {auto.RETRY_MINUTES} minutes")
         print(f"Log: {plugin_data_dir(store.PLUGIN) / auto.LOG}")
-        queue = store.auto_queue_rows()
+        queue = store.auto_queue_rows(STATUS_ROWS + 1)
         if queue:
-            print()
+            print(f"\nLatest changes{f' ({STATUS_ROWS} newest shown)' if len(queue) > STATUS_ROWS else ''}:")
             print(_table([[q["skill"], q["session_id"] or "–", q["state"], _local(q["changed_at"]),
-                           str(q["trial_id"] or ""), q["note"] or ""] for q in queue],
-                         ["skill", "session", "state", "changed", "trial", "note"]))
-        notices = store.notices()
+                           _local(q["last_attempt_at"]) if q["last_attempt_at"] else "", str(q["trial_id"] or ""),
+                           q["note"] or ""] for q in queue[:STATUS_ROWS]],
+                         ["skill", "session", "state", "changed", "runner started", "trial", "note"]))
+        notices = store.notices(STATUS_ROWS + 1)
         if notices:
-            print("\nNotices:")
-            for n in notices:
-                when = f"posted {_local(n['delivered_at'])}" if n["delivered_at"] else "waiting for your next turn"
+            print(f"\nLatest notices{f' ({STATUS_ROWS} newest shown)' if len(notices) > STATUS_ROWS else ''}:")
+            for n in notices[:STATUS_ROWS]:
+                if n["delivered_at"]:
+                    when = f"posted {_local(n['delivered_at'])}"
+                elif n["sender"]:
+                    when = f"waiting for {n['sender']} on {n['platform']}"
+                else:
+                    when = "waiting for your next turn in the CLI, TUI or Desktop"
                 print(f"  [{when}] {n['text']}")
         return 0
     print("usage: hermes court auto {on,off,status}")
