@@ -137,6 +137,9 @@ function AppealCell({ row, applyFix }) {
           jsx('summary', { className: 'cursor-pointer text-(--ui-text-secondary)', children: 'Show the change' }),
           jsx('pre', {
             className: 'mt-1 max-h-64 overflow-auto rounded border border-(--ui-stroke-secondary) p-2 font-mono',
+            // Inline: the host's stylesheet is built without this plugin's classes, and an uncapped
+            // diff widens the table until the other columns scroll out of view.
+            style: { maxWidth: '36rem', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
             children: appeal.diff
           })
         ]
