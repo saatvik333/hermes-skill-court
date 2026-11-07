@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
-import importlib
+import asyncio
+import importlib.util
 import json
-import sys
-import types
 from pathlib import Path
+from types import ModuleType
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-# Hermes loads this file on its own, outside the plugin package, so the package's modules are
-# imported through a bare package shell (its ``register`` is not run again).
-_PACKAGE = "skill_court_dashboard"
-if _PACKAGE not in sys.modules:
-    shell = types.ModuleType(_PACKAGE)
-    shell.__path__ = [str(Path(__file__).resolve().parents[1])]
-    sys.modules[_PACKAGE] = shell
-store = importlib.import_module(f"{_PACKAGE}.store")
-skills = importlib.import_module(f"{_PACKAGE}.skills")
+
+def _sibling(name: str) -> ModuleType:
+    """Load one of the plugin's own modules from the folder above. Hermes imports this file on its
+    own, outside the plugin package; ``store`` and ``skills`` have no relative imports."""
+    path = Path(__file__).resolve().parents[1] / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"skill_court_dashboard_{name}", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+store = _sibling("store")
+skills = _sibling("skills")
 
 router = APIRouter()
 
@@ -32,17 +38,17 @@ class QuarantineBody(BaseModel):
 
 class ReleaseBody(BaseModel):
     skill: str
-    model: str | None = None
+    model: str
 
 
-@router.get("/verdicts")
-async def verdicts() -> dict:
+def _verdicts() -> dict:
     library = skills.library()
-    hidden = {(skill, model): reason for skill, model, reason, _ in store.quarantine_entries()}
+    hidden = {(skill, model) for skill, model, _reason, _since in store.quarantine_entries()}
     rows = []
     for trial in store.latest_trials():
         current = library.get(trial["skill"])
         rows.append({
+            **json.loads(trial["summary"] or "{}"),
             "skill": trial["skill"],
             "model": trial["model"],
             "verdict": trial["verdict"],
@@ -50,20 +56,30 @@ async def verdicts() -> dict:
             "trial_id": trial["id"],
             "skill_changed": current is None or current.content_hash() != trial["skill_hash"],
             "quarantined": (trial["skill"], trial["model"]) in hidden or (trial["skill"], store.ANY_MODEL) in hidden,
-            **json.loads(trial["summary"] or "{}"),
         })
     quarantine = [{"skill": s, "model": m, "reason": r, "since": c} for s, m, r, c in store.quarantine_entries()]
     return {"verdicts": rows, "quarantine": quarantine}
 
 
-@router.post("/quarantine")
-async def quarantine(body: QuarantineBody) -> dict:
+def _quarantine(body: QuarantineBody) -> dict:
     if body.skill not in skills.library():
         raise HTTPException(status_code=404, detail=f"no skill named {body.skill}")
     store.quarantine(body.skill, body.model, body.reason)
     return {"ok": True}
 
 
+# SQLite and skill hashing block, so they run off the event loop; to_thread carries the request's
+# context (the profile it is scoped to) into the worker thread.
+@router.get("/verdicts")
+async def verdicts() -> dict:
+    return await asyncio.to_thread(_verdicts)
+
+
+@router.post("/quarantine")
+async def quarantine(body: QuarantineBody) -> dict:
+    return await asyncio.to_thread(_quarantine, body)
+
+
 @router.post("/release")
 async def release(body: ReleaseBody) -> dict:
-    return {"released": store.release(body.skill, body.model)}
+    return {"released": await asyncio.to_thread(store.release, body.skill, body.model)}

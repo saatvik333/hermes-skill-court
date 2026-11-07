@@ -62,8 +62,11 @@ def tasks_in_session(messages: list[dict], wanted: frozenset[str] | None) -> dic
 
 def mine(wanted: Iterable[str] | None, per_skill: int) -> dict[str, list[MinedTask]]:
     """Newest-first distinct prompts per skill, at most ``per_skill`` each."""
+    from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
 
+    if not (get_hermes_home() / "state.db").exists():
+        return {}  # a profile that has never run a session has no history to mine
     wanted_set = frozenset(wanted) if wanted is not None else None
     found: dict[str, list[MinedTask]] = {}
     seen: set[tuple[str, str]] = set()

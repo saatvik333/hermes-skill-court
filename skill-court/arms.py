@@ -1,19 +1,24 @@
 """The two replay profiles of a trial: one with the skill under test, one without it.
 
 Both are fresh clones of the source profile (config, keys, SOUL, memory, skills), so a replay sees
-the user's real setup. Each clone is then pinned to an isolated sandbox: Docker backend, one fresh
-container per session, no host mounts, no forwarded host environment, no egress proxy (the proxy's
-credentials are per profile and are not cloned). Skill Court's own plugin is disabled in the clones.
+the user's model, prompt and skills. Each clone is then cut off from everything outside its sandbox:
+Docker backend, one fresh container per session, no host mounts, extra `docker run` flags,
+container env or forwarded host env; no MCP servers, external memory provider or other plugins;
+no tools that run on the host or keep state between replays (code execution, browser, computer
+use, cron, memory writes, session search, connections) and no media generation. Skill edits are
+staged instead of applied, and approval prompts are denied rather than auto-approved.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 from hermes_constants import get_default_hermes_root
 
-from . import store
 from .procs import CommandError, container_binary, hermes, run
 
 ARMS = ("with", "without")
@@ -21,18 +26,30 @@ ARMS = ("with", "without")
 # rebuilds a profile that carries it, never one the user happened to name the same way.
 DESCRIPTION = "Skill Court replay sandbox (created and deleted by the skill-court plugin)"
 MAX_TURNS = 60
-# Containers must outlive the one-shot session long enough for the check to run in them; the
-# runner removes each one itself right after its check. ``max_turns`` bounds a replay that loops:
-# a timed-out client only detaches, and the turn would otherwise keep running on the gateway.
 _SANDBOX_SETTINGS = (
     ("terminal.backend", "docker"),
+    # One fresh container per session; it outlives the session long enough for the check, and
+    # the runner removes it right after.
     ("terminal.container_persistent", "false"),
-    ("terminal.docker_mount_cwd_to_workspace", "false"),
-    ("terminal.docker_forward_env", "[]"),
     ("terminal.lifetime_seconds", "1800"),
+    ("terminal.docker_shared_container_key", ""),
+    ("terminal.docker_mount_cwd_to_workspace", "false"),
+    ("terminal.docker_volumes", "[]"),
+    ("terminal.docker_extra_args", "[]"),
+    ("terminal.docker_env", "{}"),
+    ("terminal.docker_forward_env", "[]"),
+    ("terminal.env_passthrough", "[]"),
+    # The egress proxy's credentials belong to the source profile and are not cloned.
     ("proxy.enabled", "false"),
+    ("mcp_servers", "{}"),
+    ("memory.provider", ""),
+    ("plugins.enabled", "[]"),
+    ("skills.write_approval", "true"),
+    ("approvals.single_query_mode", "deny"),
     ("agent.max_turns", str(MAX_TURNS)),
 )
+_DISABLED_TOOLSETS = ("code_execution", "computer_use", "browser", "cronjob", "session_search",
+                      "connections", "memory", "kanban", "image_gen", "video_gen", "tts")
 
 
 @dataclass(frozen=True)
@@ -42,36 +59,44 @@ class Arms:
 
 
 def arm_profile(source: str, arm: str) -> str:
-    return f"{source}-court-{arm}"[:64]
+    """Short and distinct per source and arm, so Hermes' 63-character container label keeps most of
+    the session id after the profile name."""
+    return f"court-{hashlib.sha256(source.encode()).hexdigest()[:8]}-{arm}"
 
 
-def _profile_dir(name: str):
+def for_source(source: str) -> Arms:
+    return Arms(source=source, profiles={arm: arm_profile(source, arm) for arm in ARMS})
+
+
+def profile_home(name: str) -> Path:
     return get_default_hermes_root() / "profiles" / name
 
 
 def _owned(name: str) -> bool:
     try:
-        return DESCRIPTION in (_profile_dir(name) / "profile.yaml").read_text(encoding="utf-8")
+        text = (profile_home(name) / "profile.yaml").read_text(encoding="utf-8")
     except OSError:
         return False
+    # profile.yaml may fold the long description across lines.
+    return DESCRIPTION in " ".join(text.split())
 
 
-def _yaml_list(names: list[str]) -> str:
-    return "[" + ", ".join(names) + "]"
-
-
-def _config_list(profile: str, key: str) -> list[str]:
-    out = hermes("-p", profile, "config", "get", key, check=False).stdout
-    return [line.strip()[2:].strip() for line in out.splitlines() if line.strip().startswith("- ")]
+def _config_json(profile: str, key: str):
+    proc = hermes("-p", profile, "config", "get", key, "--json", check=False)
+    try:
+        return json.loads(proc.stdout) if proc.returncode == 0 else None
+    except ValueError:
+        return None
 
 
 def source_disabled_skills(source: str) -> list[str]:
-    return _config_list(source, "skills.disabled")
+    value = _config_json(source, "skills.disabled")
+    return [str(v) for v in value] if isinstance(value, list) else []
 
 
 def source_model(source: str) -> str:
-    out = hermes("-p", source, "config", "get", "model.default", check=False).stdout.strip()
-    return out.splitlines()[0].strip() if out and "not set" not in out else ""
+    value = _config_json(source, "model.default")
+    return value if isinstance(value, str) else ""
 
 
 def _remove_sandboxes(profile: str) -> None:
@@ -88,23 +113,20 @@ def _delete(profile: str) -> None:
 
 
 def _build(source: str, profile: str) -> None:
-    if _profile_dir(profile).exists():
+    if profile_home(profile).exists():
         if not _owned(profile):
             raise CommandError(f"a profile named '{profile}' already exists and was not created by Skill Court; "
                                "rename it, or remove it yourself, before running a trial")
         _delete(profile)
     hermes("profile", "create", profile, "--clone-from", source, "--no-alias", "--description", DESCRIPTION)
     for key, value in _SANDBOX_SETTINGS:
-        hermes("-p", profile, "config", "set", key, value)
-    hermes("-p", profile, "plugins", "disable", store.PLUGIN, check=False)
-
-
-def for_source(source: str) -> Arms:
-    return Arms(source=source, profiles={arm: arm_profile(source, arm) for arm in ARMS})
+        hermes("-p", profile, "config", "set", key, value, "--force")
+    hermes("-p", profile, "tools", "disable", *_DISABLED_TOOLSETS)
 
 
 def prepare(arms: Arms) -> None:
-    """Re-clone both replay profiles from the source so they carry its current skills and config."""
+    """Clone both replay profiles fresh from the source, so a skill's trial never inherits state
+    from an earlier one."""
     with ThreadPoolExecutor(max_workers=len(ARMS)) as pool:
         for future in [pool.submit(_build, arms.source, p) for p in arms.profiles.values()]:
             future.result()
@@ -115,12 +137,12 @@ def set_skill_under_test(arms: Arms, skill: str, hidden: list[str]) -> None:
     base = sorted(set(hidden) - {skill})
     disabled = {"with": base, "without": sorted({*base, skill})}
     for arm, profile in arms.profiles.items():
-        hermes("-p", profile, "config", "set", "skills.disabled", _yaml_list(disabled[arm]), "--force")
+        hermes("-p", profile, "config", "set", "skills.disabled", json.dumps(disabled[arm]), "--force")
 
 
 def remove(arms: Arms) -> None:
     for profile in arms.profiles.values():
-        if _profile_dir(profile).exists() and _owned(profile):
+        if profile_home(profile).exists() and _owned(profile):
             try:
                 _delete(profile)
             except CommandError as exc:

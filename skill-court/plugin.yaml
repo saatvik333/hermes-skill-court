@@ -7,6 +7,7 @@ description: >-
 author: saatvik333
 license: MIT
 requires_hermes: ">=0.23.0"
+platforms: [linux, macos]
 provides_hooks:
   - pre_tool_call
   - transform_tool_result

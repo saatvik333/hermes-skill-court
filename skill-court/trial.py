@@ -17,10 +17,8 @@ from .skills import Skill
 
 @dataclass(frozen=True)
 class Options:
-    tasks: int = 5
     reps: int = 1
     parallel: int = 4
-    budget_usd: float = 3.0
     timeout: float = 900
     model: str | None = None
     provider: str | None = None
@@ -28,16 +26,29 @@ class Options:
 
 
 class Budget:
-    def __init__(self, limit_usd: float) -> None:
-        self.limit = limit_usd
-        self.spent = 0.0
+    """Spend reported by the provider. A run whose model answered but reported no price makes the
+    total unknown; then no new runs start unless ``allow_unpriced``."""
 
-    def add(self, cost: float | None) -> None:
-        self.spent += cost or 0.0
+    def __init__(self, limit_usd: float, allow_unpriced: bool) -> None:
+        self.limit = limit_usd
+        self.allow_unpriced = allow_unpriced
+        self.spent = 0.0
+        self.unpriced = 0
+
+    def add(self, result: runner.RunResult) -> None:
+        if result.cost_usd is not None:
+            self.spent += result.cost_usd
+        elif result.tokens:
+            self.unpriced += 1
 
     @property
     def exhausted(self) -> bool:
-        return self.spent >= self.limit
+        return self.spent >= self.limit or (self.unpriced > 0 and not self.allow_unpriced)
+
+    def why_stopped(self) -> str:
+        if self.spent >= self.limit:
+            return f"budget of ${self.limit:.2f} reached"
+        return "the provider reported no price for a run, so the budget cannot be enforced (pass --allow-unpriced to continue)"
 
 
 @dataclass(frozen=True)
@@ -75,12 +86,13 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
     results: dict[tuple[int, int], dict[str, runner.RunResult]] = {}
     total = len(queue) * len(ARMS)
     finished = 0
+    slots = max(len(ARMS), opts.parallel)
 
-    with ThreadPoolExecutor(max_workers=max(len(ARMS), opts.parallel)) as pool:
+    with ThreadPoolExecutor(max_workers=slots) as pool:
         in_flight: dict[Future, tuple[store.Task, int, str]] = {}
         while queue or in_flight:
             # Both arms of a pair start together, so time-of-day effects hit them equally.
-            while queue and len(in_flight) + len(ARMS) <= max(len(ARMS), opts.parallel) and not budget.exhausted:
+            while queue and len(in_flight) + len(ARMS) <= slots and not budget.exhausted:
                 task, rep = queue.popleft()
                 for arm in ARMS:
                     future = pool.submit(runner.replay, arms.profiles[arm], task.prompt, task.check_cmd,
@@ -88,28 +100,31 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
                                          provider=opts.provider)
                     in_flight[future] = (task, rep, arm)
             if not in_flight:
-                say(f"  budget of ${budget.limit:.2f} reached; {len(queue)} pair(s) not run")
+                say(f"  {budget.why_stopped()}; {len(queue)} pair(s) not run")
                 break
             done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
             for future in done:
                 task, rep, arm = in_flight.pop(future)
                 result = future.result()
-                budget.add(result.cost_usd)
+                budget.add(result)
                 store.record_run(trial_id, {"task_id": task.id, "arm": arm, "rep": rep, **result.as_row()})
                 results.setdefault((task.id, rep), {})[arm] = result
                 finished += 1
                 say(f"  [{finished}/{total}] task {task.id} {arm:<7} {_describe(result, task.check_cmd is not None)}")
 
     checks = {task.id: task.check_cmd is not None for task in tasks}
-    pairs = [
-        scoring.Pair(
-            scoring.Arm(_success(arms_[ARMS[0]], checks[task_id]), arms_[ARMS[0]].tokens),
-            scoring.Arm(_success(arms_[ARMS[1]], checks[task_id]), arms_[ARMS[1]].tokens),
-        )
-        for (task_id, _rep), arms_ in results.items() if len(arms_) == len(ARMS)
-    ]
+    pairs = []
+    for (task_id, _rep), by_arm in results.items():
+        if len(by_arm) != len(ARMS):
+            continue
+        with_run, without_run = by_arm["with"], by_arm["without"]
+        pairs.append(scoring.Pair(
+            task_id,
+            scoring.Arm(_success(with_run, checks[task_id]), with_run.tokens),
+            scoring.Arm(_success(without_run, checks[task_id]), without_run.tokens),
+        ))
     outcome = scoring.score(pairs)
-    observed = Counter(r.model for arms_ in results.values() for r in arms_.values() if r.model)
+    observed = Counter(r.model for by_arm in results.values() for r in by_arm.values() if r.model)
     model = observed.most_common(1)[0][0] if observed else model
     store.finish_trial(trial_id, model, outcome.verdict, json.dumps(asdict(outcome)))
 

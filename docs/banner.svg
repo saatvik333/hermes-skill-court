@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600">
+  <rect width="1200" height="600" fill="#0f1115"/>
+  <g font-family="JetBrainsMono Nerd Font Mono, JetBrains Mono, monospace">
+    <text x="72" y="118" fill="#f2f3f5" font-size="64" font-weight="700">Skill Court</text>
+    <text x="72" y="170" fill="#a9b0bc" font-size="26">Does the skill your agent wrote actually help?</text>
+    <text x="72" y="210" fill="#a9b0bc" font-size="22">Same tasks, with and without the skill, judged per model.</text>
+
+    <g font-size="21">
+      <text x="72" y="292" fill="#6c7380">skill</text>
+      <text x="402" y="292" fill="#6c7380">success without → with</text>
+      <text x="752" y="292" fill="#6c7380">tokens</text>
+      <text x="902" y="292" fill="#6c7380">verdict</text>
+      <line x1="72" y1="308" x2="1128" y2="308" stroke="#2a2f38" stroke-width="2"/>
+
+      <text x="72" y="350" fill="#e6e8eb">team-changelog</text>
+      <text x="402" y="350" fill="#e6e8eb">0% → 100%</text>
+      <text x="752" y="350" fill="#e6e8eb">+2%</text>
+      <rect x="896" y="326" width="96" height="32" rx="4" fill="#123d2a"/>
+      <text x="908" y="350" fill="#5fd39a">helps</text>
+
+      <text x="72" y="402" fill="#e6e8eb">sales-csv-totals</text>
+      <text x="402" y="402" fill="#e6e8eb">100% → 0%</text>
+      <text x="752" y="402" fill="#e6e8eb">+53%</text>
+      <rect x="896" y="378" width="96" height="32" rx="4" fill="#4a1d1f"/>
+      <text x="908" y="402" fill="#ff8a8a">hurts</text>
+      <text x="1006" y="402" fill="#a9b0bc" font-size="18">quarantined</text>
+
+      <text x="72" y="454" fill="#e6e8eb">python-venv-setup</text>
+      <text x="402" y="454" fill="#e6e8eb">100% → 100%</text>
+      <text x="752" y="454" fill="#e6e8eb">+54%</text>
+      <rect x="896" y="430" width="96" height="32" rx="4" fill="#4a1d1f"/>
+      <text x="908" y="454" fill="#ff8a8a">hurts</text>
+      <text x="1006" y="454" fill="#a9b0bc" font-size="18">quarantined</text>
+
+      <text x="72" y="506" fill="#e6e8eb">json-format</text>
+      <text x="402" y="506" fill="#e6e8eb">100% → 100%</text>
+      <text x="752" y="506" fill="#e6e8eb">+0%</text>
+      <rect x="896" y="482" width="112" height="32" rx="4" fill="#262a31"/>
+      <text x="908" y="506" fill="#b9bec7">neutral</text>
+    </g>
+    <text x="72" y="566" fill="#6c7380" font-size="17">Demo library, Claude Sonnet 5.5, 3 paired Docker replays per skill. Skill files never edited.</text>
+  </g>
+</svg>

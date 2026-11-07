@@ -1,16 +1,26 @@
-"""One replay: run a task once in a replay profile, then check the result inside its sandbox."""
+"""One replay: run a task once in a replay profile, then check the result inside its sandbox.
+
+Replays run as single-query sessions (``hermes chat -Q --oneshot``): approval prompts follow
+``approvals.single_query_mode`` (deny in replay profiles) instead of being auto-approved, and
+``--run-budget`` makes the gateway itself end a turn that runs too long.
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .arms import MAX_TURNS, profile_home
 from .procs import CommandError, container_binary, hermes_binary, run
 
 CHECK_TIMEOUT = 120
+# Time the client waits past the gateway's own run budget before giving up on a run.
+CLIENT_GRACE = 120
+_SESSION_LINE = re.compile(r"^session_id:\s*(\S+)\s*$", re.MULTILINE)
 
 
 @dataclass
@@ -33,40 +43,56 @@ class RunResult:
         return row
 
 
-def _session_container(profile: str, session_id: str) -> str | None:
-    """The sandbox Hermes created for one session of ``profile``.
+def session_containers(profile: str, session_id: str, labelled: list[tuple[str, str]]) -> list[str]:
+    """Sandboxes Hermes created for ``session_id``, from ``(container id, task-id label)`` pairs.
 
-    Hermes labels it ``hermes-task-id=profile_<profile>_<session id>``, cut to 63 characters, and
-    ``hermes-profile=<profile>``. Filtering on both labels in one ``ps`` call avoids racing the
-    removal of other runs' containers.
+    Hermes labels a session's sandbox with its task id cut to 63 characters: the session id, or
+    ``profile_<profile>_<session id>`` on a gateway serving several profiles. Callers act only on
+    exactly one match, so a check never reads, and a cleanup never removes, another run's sandbox.
     """
-    label = f"profile_{profile}_{session_id}"[:63]
-    ids = run([container_binary(), "ps", "-a", "-q", "--filter", f"label=hermes-profile={profile}",
-               "--filter", f"label=hermes-task-id={label}"], timeout=60).stdout.split()
-    return ids[0] if ids else None
+    wanted = {session_id[:63], f"profile_{profile}_{session_id}"[:63]}
+    return [cid for cid, label in labelled if label in wanted]
 
 
-def _read_usage(path: Path, result: RunResult) -> bool:
-    """Fill ``result`` from the usage report; False when the turn never got a model response.
-
-    A provider or credential failure ends the run with ``failed`` and no ``turn_exit_reason``. That
-    says nothing about the skill, so such a run has no outcome. A turn that ran and stopped for its
-    own reasons (iteration budget, partial) did get responses and counts as not completed.
-    """
+def _labelled_containers(profile: str) -> list[tuple[str, str]]:
+    docker = container_binary()
+    ids = run([docker, "ps", "-a", "-q", "--filter", f"label=hermes-profile={profile}"], timeout=60).stdout.split()
+    if not ids:
+        return []
+    proc = run([docker, "inspect", *ids], timeout=60, check=False)
     try:
-        usage = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        inspected = json.loads(proc.stdout or "[]")
+    except ValueError:
+        return []
+    return [(c.get("Id", ""), ((c.get("Config") or {}).get("Labels") or {}).get("hermes-task-id", ""))
+            for c in inspected if isinstance(c, dict)]
+
+
+def read_session(profile: str, session_id: str, result: RunResult) -> bool:
+    """Fill usage from the replay profile's session record; False when the model never answered
+    (provider, credit or credential failure), which says nothing about the skill."""
+    from hermes_state import SessionDB
+
+    db_path = profile_home(profile) / "state.db"
+    if not db_path.exists():
         return False
-    total = usage.get("total_including_auxiliary") or {}
-    result.session_id = usage.get("session_id")
-    result.model = usage.get("model")
-    result.api_calls = total.get("api_calls", usage.get("api_calls"))
-    result.tokens = total.get("total_tokens", usage.get("total_tokens"))
-    result.cost_usd = total.get("estimated_cost_usd", usage.get("estimated_cost_usd"))
-    if usage.get("failed") and not usage.get("turn_exit_reason"):
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        row = db.get_session(session_id)
+    finally:
+        db.close()
+    if not row:
         return False
-    result.completed = bool(usage.get("completed")) and not usage.get("failed")
-    return True
+    return apply_session_row(row, result)
+
+
+def apply_session_row(row: dict, result: RunResult) -> bool:
+    tokens = sum(int(row.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"))
+    result.model = row.get("model")
+    result.api_calls = row.get("api_call_count")
+    result.tokens = tokens or None
+    result.cost_usd = row.get("estimated_cost_usd")
+    return tokens > 0
 
 
 def _tail(text: str, lines: int = 2, chars: int = 240) -> str:
@@ -77,10 +103,12 @@ def _tail(text: str, lines: int = 2, chars: int = 240) -> str:
 def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, timeout: float,
            model: str | None = None, provider: str | None = None) -> RunResult:
     """Run ``prompt`` once in ``profile``. ``passed`` and ``completed`` stay None when the run has no
-    outcome (provider failure, timeout, missing report); such runs are left out of the verdict."""
+    outcome (the model never answered, or the client gave up); such runs are left out of the verdict."""
     result = RunResult()
-    usage_file = workdir / f"usage-{uuid.uuid4().hex}.json"
-    argv = [hermes_binary(), "-p", profile, "-z", prompt, "--usage-file", str(usage_file)]
+    query = workdir / f"query-{uuid.uuid4().hex}.txt"
+    query.write_text(prompt, encoding="utf-8")
+    argv = [hermes_binary(), "-p", profile, "chat", "-Q", "--oneshot", "--query-file", str(query),
+            "--source", "tool", "--max-turns", str(MAX_TURNS), "--run-budget", str(int(timeout))]
     if model:
         argv += ["-m", model]
     if provider:
@@ -88,27 +116,42 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     started = time.monotonic()
     output = ""
     try:
-        proc = run(argv, timeout=timeout, check=False, cwd=str(workdir))
+        proc = run(argv, timeout=timeout + CLIENT_GRACE, check=False, cwd=str(workdir))
         result.exit_code = proc.returncode
         output = f"{proc.stdout}\n{proc.stderr}"
+        found = _SESSION_LINE.search(proc.stderr or "")
+        result.session_id = found.group(1) if found else None
     except CommandError as exc:
         result.error = str(exc)
+    finally:
+        query.unlink(missing_ok=True)
     result.seconds = round(time.monotonic() - started, 1)
-    responded = _read_usage(usage_file, result)
-    usage_file.unlink(missing_ok=True)
+    if result.session_id is None:
+        result.error = result.error or f"no session was reported: {_tail(output) or 'no output'}"
+        return result
 
+    responded = read_session(profile, result.session_id, result)
     try:
-        container = _session_container(profile, result.session_id) if result.session_id else None
+        matches = session_containers(profile, result.session_id, _labelled_containers(profile))
+        container = matches[0] if len(matches) == 1 else None
         if not responded:
-            result.error = result.error or f"no model response: {_tail(output) or 'no usage report'}"
-        elif check_cmd is not None:
-            if container is None:
-                result.passed = False
-                result.error = "no sandbox was created, so the check found nothing to verify"
-            else:
-                check = run([container_binary(), "exec", container, "sh", "-lc", check_cmd],
-                            timeout=CHECK_TIMEOUT, check=False)
-                result.passed = check.returncode == 0
+            result.error = f"no model response: {_tail(output) or 'empty output'}"
+        else:
+            # 0: the turn completed. 1: it ran but stopped early (iteration or time budget, partial).
+            result.completed = result.exit_code == 0 if result.exit_code in (0, 1) else None
+            if result.completed is None:
+                result.error = f"exit code {result.exit_code}: {_tail(output)}"
+            elif check_cmd is not None:
+                if container is not None:
+                    check = run([container_binary(), "exec", container, "sh", "-lc", check_cmd],
+                                timeout=CHECK_TIMEOUT, check=False)
+                    result.passed = check.returncode == 0
+                elif matches:
+                    result.error = f"{len(matches)} sandboxes carry this session's label; not checking any"
+                else:
+                    # The agent never opened a sandbox, so it produced nothing the check could find.
+                    result.passed = False
+                    result.error = "no sandbox was created, so the check found nothing to verify"
         if container is not None:
             run([container_binary(), "rm", "-f", container], timeout=60, check=False)
     except CommandError as exc:
