@@ -441,8 +441,8 @@ hermes -p courtlab court report
 - A Hermes 0.23 gateway serving the profile can leak a hosted-room poller thread when profiles are
   created and deleted in quick succession, which each trial's replay clones (two per skill) do. The
   symptom is `state.db was replaced underneath the gateway` repeating in `agent.log` every 5 seconds
-  until the gateway restarts; no data is affected. The race is in Hermes core, and a fix is proposed
-  upstream.
+  until the gateway restarts; no data is affected. The race is in Hermes core
+  (`_ensure_hosted_service`); the fix offered in hermes-agent#150937 was closed without merging.
 - Quarantine hides a skill from the agent's skill index and skill tools; the file stays readable to
   file tools.
 - An appeal's draft is proven on the tasks that found the harm, not on every use of the skill: a
