@@ -66,6 +66,19 @@ def test_an_answer_only_trial_judges_every_pair_and_records_its_mode(skill, monk
     assert trial.describe_sources(outcome.sources, outcome.mode) == "3 judged, answer-only"
 
 
+def test_an_automatic_answer_only_trial_never_hides_a_skill_for_the_tokens_loading_it_costs(skill, monkeypatch):
+    # The run with the skill spends a call loading it (twice the tokens) and gives the same answer.
+    monkeypatch.setattr(trial.runner, "replay", lambda profile, *_args, **_kwargs: RunResult(
+        model=MODEL, completed=True, answer="465", workspace=NO_SANDBOX, tokens=2_000 if profile == "w" else 1_000,
+        cost_usd=0.01))
+    outcome = trial.run(skill, store.tasks_for(skill.name), Arms("default", {"with": "w", "without": "wo"}, ANSWER_ONLY),
+                        MODEL, trial.Options(apply=True), trial.Budget(5.0, False), lambda _line: None, Judge(Ties()),
+                        auto=True)
+    assert (outcome.score.verdict, outcome.quarantined, round(outcome.score.token_change, 2)) == (
+        scoring.NEUTRAL, False, 1.0)
+    assert store.hidden_for(MODEL) == {}
+
+
 def test_a_changed_skill_that_no_longer_hurts_gets_the_courts_quarantine_lifted(skill):
     store.quarantine(skill.name, MODEL, f"{store.COURT_REASON}4: success fell from 100% to 0%")
     store.quarantine(skill.name, "other-model", f"{store.COURT_REASON}5: success fell")

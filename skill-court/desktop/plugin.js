@@ -355,7 +355,7 @@ function Summary({ verdicts, quarantine, auto, usageLabel }) {
         ? jsx('p', {
             className: NOTE,
             children:
-              'Answer-only verdicts ran without a Docker sandbox: the replays had read-only tools only, and every pair was judged on the final answers. They measure what a skill makes the agent say or decide, not procedures that need tools.'
+              'Answer-only verdicts ran without a Docker sandbox: the replays had only the skills, todo and web tools, every pair was judged on the final answers, and success alone decided the verdict. They measure what a skill makes the agent say or decide, not procedures that need tools.'
           })
         : null,
       usageLabel ? jsx('p', { className: NOTE, children: `“In use” is ${usageLabel}.` }) : null

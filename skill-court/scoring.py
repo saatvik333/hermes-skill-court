@@ -5,7 +5,9 @@ when the task has one, else the run completing. Repeated runs of one task are no
 evidence, so they are averaged per task first and every interval is a bootstrap over tasks (fixed
 seed, so a report is reproducible). A verdict needs at least ``min_tasks`` tasks with outcomes in
 both arms and its whole 95% interval on one side; with three tasks that means every task moved the
-same way.
+same way. With ``efficiency`` off (answer-only trials) only success decides a verdict: there a run
+takes one or two calls, so the call that loads the skill alone can double its tokens; the token
+change is still reported.
 """
 
 from __future__ import annotations
@@ -63,7 +65,7 @@ def _pct(x: float) -> str:
     return f"{round(x * 100):+d}%"
 
 
-def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25,
+def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25, efficiency: bool = True,
           resamples: int = 2000, seed: int = 0) -> Score:
     rng = random.Random(seed)
     judged = [p for p in pairs if p.with_skill.success is not None and p.without_skill.success is not None]
@@ -101,7 +103,7 @@ def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0
         return result(HURTS, f"success fell from {success_without:.0%} without the skill to {success_with:.0%} with it")
     if success_ci[0] > 0:
         return result(HELPS, f"success rose from {success_without:.0%} without the skill to {success_with:.0%} with it")
-    if token_ci is not None and token_change is not None and len(task_ratios) >= min_tasks:
+    if efficiency and token_ci is not None and token_change is not None and len(task_ratios) >= min_tasks:
         change = (f"success went from {success_without:.0%} without the skill to {success_with:.0%} with it"
                   if success_delta else "success was the same")
         if success_delta <= 0 and token_ci[0] > efficiency_margin:
@@ -109,15 +111,19 @@ def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0
         # The mirror of "costs 25% more" is "costs 1/1.25 as much", i.e. 20% less, not 25% less.
         if success_delta >= 0 and token_ci[1] < 1 / (1 + efficiency_margin) - 1:
             return result(HELPS, f"{change}, and runs used {_pct(token_change)} tokens with the skill")
-    return result(NEUTRAL, "no measurable difference in success or token use")
+    return result(NEUTRAL, "no measurable difference in success or token use" if efficiency
+                  else "no measurable difference in success")
 
 
-def settled_early(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25) -> bool:
+def settled_early(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25,
+                  efficiency: bool = True) -> bool:
     """Whether the first pairs already show nothing worth more replays: every judged pair ended the
-    same way in both arms, on at least ``min_tasks`` tasks, and the skill's token change is inside the
-    efficiency margin (between 1/1.25 and 1.25 times the tokens for the default)."""
+    same way in both arms, on at least ``min_tasks`` tasks, and (with ``efficiency``) the skill's token
+    change is inside the efficiency margin (between 1/1.25 and 1.25 times the tokens for the default)."""
     judged = [p for p in pairs if p.with_skill.success is not None and p.without_skill.success is not None]
     if len({p.task for p in judged}) < min_tasks or any(p.with_skill.success != p.without_skill.success for p in judged):
         return False
+    if not efficiency:
+        return True
     change = score(pairs, min_tasks=min_tasks, efficiency_margin=efficiency_margin).token_change
     return change is not None and abs(math.log1p(change)) < math.log1p(efficiency_margin)

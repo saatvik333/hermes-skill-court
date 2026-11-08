@@ -2,13 +2,15 @@ import argparse
 import fcntl
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from skill_court import auto, cli, quarantine, scoring, store, trial, usage
+from skill_court import auto, cli, quarantine, scoring, store, trial
 from skill_court.arms import ANSWER_ONLY
+from skill_court.judge import Attempt
 from skill_court.procs import CommandError
 
 ON = store.AutoSettings(enabled=True, daily_budget_usd=1.0, quiet_minutes=15, daily_judge_tokens=1_000)
@@ -309,14 +311,17 @@ def test_a_trial_the_judge_could_not_decide_names_the_judge_error():
 
 @pytest.fixture
 def runner(monkeypatch):
-    """``hermes court trial --auto`` with Docker, the skill library and history stubbed."""
+    """``hermes court trial --auto`` with Docker, the skill library, the profile's model and history
+    stubbed; it takes the host's LLM client (None: no judge call is made)."""
     monkeypatch.setattr(cli.arms, "sandbox_unavailable", lambda: None)
-    monkeypatch.setattr(cli.skills, "library", lambda: {"csv-totals": SimpleNamespace(name="csv-totals")})
+    monkeypatch.setattr(cli.skills, "library", lambda: {
+        "csv-totals": SimpleNamespace(name="csv-totals", content_hash=lambda: "v1")})
     monkeypatch.setattr(cli.arms, "source_disabled_skills", lambda _source: [])
+    monkeypatch.setattr(cli.arms, "source_model", lambda _source: MODEL)
     parser = argparse.ArgumentParser()
     cli.setup(parser)
     store.set_auto_settings(ON)
-    return lambda: cli.dispatch(parser.parse_args(["trial", "--auto"]), None)
+    return lambda llm=None: cli.dispatch(parser.parse_args(["trial", "--auto"]), llm)
 
 
 def queue(*sessions):
@@ -324,6 +329,17 @@ def queue(*sessions):
         store.queue_change("csv-totals", session)
         store.end_session(session)
     auto.launch_ready(ON)
+
+
+def test_a_change_whose_version_was_already_judged_on_the_profiles_model_is_not_tried_again(runner, monkeypatch):
+    tried = []
+    monkeypatch.setattr(cli, "_auto_tasks", lambda *_: [store.Task(1, "csv-totals", "Total it", None, "mined", None)])
+    monkeypatch.setattr(cli, "_try_skills", lambda *args, **_kwargs: tried.append(args) or [])
+    finished("csv-totals", "v1", MODEL)  # say, by an earlier batch's re-check on the profile's model
+    queue("s1")
+    assert runner() == 0 and tried == []
+    [row] = rows()
+    assert (row["state"], row["note"]) == ("done", f"its current version has a verdict on {MODEL}")
 
 
 def test_the_runner_addresses_each_verdict_to_whoever_changed_the_skill(runner, monkeypatch):
@@ -363,6 +379,32 @@ def test_a_runner_without_docker_tries_the_changes_answer_only(runner, monkeypat
     assert modes == [ANSWER_ONLY] and [r["state"] for r in rows()] == ["done"]
 
 
+def test_the_runners_judge_total_counts_the_drafted_fix_too(runner, monkeypatch, capsys):
+    """The fix drafted and tried after a harmful verdict uses the runner's judge; the total it prints
+    in ``auto.log`` counts those calls, not only the trial's comparisons."""
+    monkeypatch.setattr(cli, "_auto_tasks", lambda *_: [store.Task(1, "csv-totals", "Total it", None, "mined", None)])
+    llm = SimpleNamespace(complete_structured=lambda **_: SimpleNamespace(
+        parsed={"better": "B", "reason": "r", "skill_md": "---\nname: csv-totals\n---\n"}, text="", model="judge-model",
+        usage=SimpleNamespace(total_tokens=10, cost_usd=None)))
+
+    def try_skills(_source, _library, selected, _opts, _budget, judge, *_args, after, **_kwargs):
+        judgment = judge.compare("Total it", Attempt("4.65", ""), Attempt("465", ""))  # two calls
+        result = replace(outcome(scoring.HURTS, store.start_trial("csv-totals", "h", MODEL, auto=True)),
+                         cause="it divided the total by 100", judge_tokens=judgment.tokens)
+        after("csv-totals", result)
+        return [("csv-totals", result)]
+
+    def draft_and_try(_source, _skill, _model, _opts, _budget, judge, _say, auto):
+        judge.draft("---\nname: csv-totals\n---\n", "it divided the total by 100", None, {})  # one more
+        return {"id": 1, "verdict": "denied", "reason": "it still hurts"}
+
+    monkeypatch.setattr(cli, "_try_skills", try_skills)
+    monkeypatch.setattr(cli.appeal, "draft_and_try", draft_and_try)
+    queue("s1")
+    assert runner(llm) == 0
+    assert "The judge (skill_court_judge) used 30 tokens" in capsys.readouterr().out
+
+
 def finished(skill, skill_hash, model):
     store.finish_trial(store.start_trial(skill, skill_hash, model, auto=True), model, scoring.NEUTRAL, "{}")
 
@@ -396,8 +438,11 @@ def test_the_runner_tries_changes_then_the_most_used_rechecks_within_the_budget(
                for name in ("csv-totals", "json-format", "team-changelog")}
     monkeypatch.setattr(cli.skills, "library", lambda: library)
     monkeypatch.setattr(cli, "_auto_tasks", lambda name, *_: [store.Task(1, name, "Do it", None, "mined", None)])
-    monkeypatch.setattr(cli.usage, "scan", lambda _wanted: {
-        "json-format": {HAIKU: usage.Usage(sessions=2)}, "team-changelog": {HAIKU: usage.Usage(sessions=5)}})
+
+    def no_scan(_wanted):
+        raise AssertionError("ordering re-checks must not scan session history")
+
+    monkeypatch.setattr(cli.usage, "scan", no_scan)
     ran = []
 
     def try_skills(_source, _library, selected, opts, budget, *_args, mode, after, **_kwargs):
@@ -410,27 +455,38 @@ def test_the_runner_tries_changes_then_the_most_used_rechecks_within_the_budget(
 
     monkeypatch.setattr(cli, "_try_skills", try_skills)
     queue("s1")
-    for skill in ("json-format", "team-changelog"):
-        store.queue_recheck(skill, f"h-{skill}", HAIKU, "anthropic")
-        store.end_session(f"h-{skill}")
+    # Loaded on Haiku in one session and in three: the most used goes first.
+    for skill, sessions in (("json-format", 1), ("team-changelog", 3)):
+        for n in range(sessions):
+            store.queue_recheck(skill, f"h-{skill}-{n}", HAIKU, "anthropic")
+            store.end_session(f"h-{skill}-{n}")
     auto.launch_ready(ON)
     assert runner() == 0
     assert ran == [("csv-totals", None, None), ("team-changelog", HAIKU, "anthropic")]
     assert {r["skill"]: r["state"] for r in rows()} == {"csv-totals": "done", "team-changelog": "done",
                                                         "json-format": "pending"}  # tomorrow's budget
     texts = [n["text"] for n in store.notices(10)]
-    assert any(f"you used `team-changelog` on {MODEL}, which it was never tested on" in t for t in texts)
+    assert any(f"you used `team-changelog` on {MODEL}; this version was never tested on {MODEL}" in t for t in texts)
 
 
-def test_the_first_run_notice_is_posted_once_and_only_in_its_own_chat(monkeypatch):
+def test_the_first_run_notice_is_posted_once_in_its_own_chat_and_to_the_owner(monkeypatch):
     monkeypatch.setattr(auto.mining, "session_origin",
                         lambda session: {"tg-1": ("telegram", "42", "dm-42")}.get(session, (None, None, None)))
     [text] = turn(session_id="tg-1", platform="telegram", sender="42")
-    assert text.startswith("Skill Court is on") and "$1.00 a day" in text and "`hermes court auto off`" in text
+    assert text.startswith("Skill Court is on") and "$1.00 of your provider" in text and "`hermes court auto off`" in text
     assert turn(session_id="tg-2", platform="telegram", sender="7") == []
-    assert turn(session_id="cli-9", platform="cli") == []  # it was the Telegram sender's, not the owner's
+    # A Telegram sender's message started it: the owner is told too, on their own clients, once.
+    assert turn(session_id="cli-9", platform="cli") == [text]
+    assert turn(session_id="cli-9", platform="cli") == []
     assert turn(session_id="tg-1", platform="telegram", sender="42") == []
     assert not store.first_run_due()
+
+
+def test_the_owners_first_run_notice_is_queued_once(monkeypatch):
+    monkeypatch.setattr(auto.mining, "session_origin", lambda _session: ("local", None, None))
+    [text] = turn(session_id="cli-1", platform="cli")
+    assert text.startswith("Skill Court is on")
+    assert turn(session_id="cli-2", platform="cli") == [] and len(store.notices(10)) == 1
 
 
 def test_no_first_run_notice_once_the_user_has_chosen():

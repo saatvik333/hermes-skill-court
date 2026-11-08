@@ -44,7 +44,7 @@ def container_binary() -> str:
     override = os.environ.get("HERMES_DOCKER_BINARY")
     found = override if override and shutil.which(override) else shutil.which("docker") or shutil.which("podman")
     if not found:
-        raise CommandError("no docker or podman command found; Skill Court replays run in Docker sandboxes")
+        raise CommandError("no docker or podman command found")
     return found
 
 

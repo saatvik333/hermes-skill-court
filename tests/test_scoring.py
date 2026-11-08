@@ -1,6 +1,6 @@
 from itertools import count
 
-from skill_court.scoring import HELPS, HURTS, INCONCLUSIVE, NEUTRAL, Arm, Pair, score
+from skill_court.scoring import HELPS, HURTS, INCONCLUSIVE, NEUTRAL, Arm, Pair, score, settled_early
 
 _task_ids = count(1)
 
@@ -51,6 +51,20 @@ def test_the_cheaper_threshold_mirrors_the_costlier_one():
     # 22% fewer tokens clears 1/1.25 (20% fewer), the mirror of costing 25% more.
     assert score([pair(True, True, 780, 1000) for _ in range(3)]).verdict == HELPS
     assert score([pair(True, True, 1220, 1000) for _ in range(3)]).verdict == NEUTRAL
+
+
+def test_without_efficiency_only_success_decides_and_the_token_change_is_still_shown():
+    # An answer-only trial: the run with the skill spends a call loading it, the answers tie.
+    costly = [pair(True, True, 2000, 1000) for _ in range(4)]
+    cheap = [pair(True, True, 400, 1000) for _ in range(3)]
+    assert (score(costly).verdict, score(cheap).verdict) == (HURTS, HELPS)
+    s = score(costly, efficiency=False)
+    assert (s.verdict, s.reason, round(s.token_change, 2)) == (NEUTRAL, "no measurable difference in success", 1.0)
+    assert score(cheap, efficiency=False).verdict == NEUTRAL
+    assert score([pair(False, True) for _ in range(3)], efficiency=False).verdict == HURTS
+    # The first wave settles once every pair ended the same way, however many tokens the skill cost.
+    assert not settled_early(costly) and settled_early(costly, efficiency=False)
+    assert not settled_early([pair(False, True)] + costly, efficiency=False)
 
 
 def test_noise_is_neutral():

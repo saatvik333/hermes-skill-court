@@ -154,3 +154,20 @@ def test_a_sandbox_replay_runs_its_tools_in_docker(monkeypatch, hermes_toolsets)
     assert settings["terminal.backend"] == "docker" and "agent.disabled_toolsets" not in settings
     assert settings["skills.inline_shell"] == "false"
     assert ("-p", "court-1a2b3c4d-with", "tools", "disable", *arms._SANDBOX_DISABLED_TOOLSETS) in commands
+
+
+def test_an_answer_only_trial_removes_sandboxes_a_killed_run_left_when_docker_answers(hermes_home, monkeypatch):
+    replay = arms.for_source("work", arms.ANSWER_ONLY)
+    for profile in replay.profiles.values():
+        (hermes_home / "profiles" / profile).mkdir(parents=True)
+        (hermes_home / "profiles" / profile / "profile.yaml").write_text(f"description: {arms.DESCRIPTION}\n")
+    removed, deleted = [], []
+    monkeypatch.setattr(arms, "_remove_sandboxes", removed.append)
+    monkeypatch.setattr(arms, "hermes", lambda *args, **_: deleted.append(args[-1]))
+    monkeypatch.setattr(arms, "sandbox_unavailable", lambda: None)  # `--answer-only` with Docker up
+    arms.remove(replay)
+    assert sorted(removed) == sorted(deleted) == sorted(replay.profiles.values())
+    removed.clear()
+    monkeypatch.setattr(arms, "sandbox_unavailable", lambda: "no docker or podman command found")
+    arms.remove(replay)
+    assert removed == []

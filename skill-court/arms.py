@@ -11,9 +11,12 @@ A clone runs in one of two modes:
   host mounts, extra ``docker run`` flags, container env or forwarded host env; the tools that run
   on the host or keep state between replays (code execution, browser, computer use, cron, memory
   writes, session search, connections) and media generation are turned off.
-- ``answer-only``, for when no container runtime answers: only the toolsets in
-  ``ANSWER_ONLY_TOOLSETS`` are left on. Every other toolset Hermes knows is disabled, including ones
-  added to Hermes later, so nothing a replay does can touch the host.
+- ``answer-only``, for when no container runtime answers: only the tools of the toolsets in
+  ``ANSWER_ONLY_TOOLSETS`` are left. Every other toolset Hermes knows whose tools are all outside
+  them is disabled, including ones added to Hermes later; a toolset that mixes allowed tools with
+  others (``coding``, ``hermes-cli``) stays listed, its other tools removed with the basic toolsets
+  that hold them, and the build is refused if any would remain. Nothing a replay does can touch the
+  host.
 """
 
 from __future__ import annotations
@@ -159,8 +162,9 @@ def _remove_sandboxes(profile: str) -> None:
 
 
 def _delete(profile: str, mode: str) -> None:
-    # An answer-only replay opened no sandbox, and no container runtime may be there to ask.
-    if mode == SANDBOX:
+    # An answer-only replay opened no sandbox, but an earlier sandbox run that was killed may have left
+    # one; it is removed whenever a container runtime answers (none may be there to ask).
+    if mode == SANDBOX or sandbox_unavailable() is None:
         _remove_sandboxes(profile)
     hermes("profile", "delete", "-y", profile)
 

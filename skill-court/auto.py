@@ -72,10 +72,11 @@ def _queue_recheck(skill: str, session_id: str) -> None:
 
 def first_run_notice(settings: store.AutoSettings) -> str:
     """What a profile running automatic trials on their defaults is told, once."""
-    return (f"Skill Court is on: it tests each skill the agent writes or changes, and each one used on a model it "
-            "was never tested on, by replaying its tasks with and without the skill (in sandboxes when Docker is "
-            f"available), using up to ${settings.daily_budget_usd:.2f} a day of your provider for replays and "
-            f"{settings.daily_judge_tokens:,} judge tokens a day. `hermes court auto off` stops it; "
+    return (f"Skill Court is on: it tests each skill the agent writes or changes, and each one you use on a model "
+            "its current version was never tested on, by replaying its tasks with and without the skill (in "
+            "sandboxes when Docker is available, otherwise with only the skills, todo and web tools). Replays "
+            f"stop for the day at ${settings.daily_budget_usd:.2f} of your provider (runs already under way finish), "
+            f"and the judge at {settings.daily_judge_tokens:,} tokens. `hermes court auto off` stops it; "
             "`hermes court auto status` shows what it did.")
 
 
@@ -117,8 +118,11 @@ def notifier(ctx: Any) -> Callable[..., None]:
         if settings.enabled:
             _launch(settings)
             if store.first_run_due():
-                # Addressed like a verdict about this session, so it reaches this turn and no other chat.
-                store.queue_first_run_notice(first_run_notice(settings), origin(session_id))
+                # Addressed like a verdict about this session, so it reaches this turn and no other chat;
+                # when someone else's message started it, the owner gets a copy on their own clients.
+                o = origin(session_id)
+                audience = [o] if o.sender is None else [o, store.Origin(None, store.LOCAL, None)]
+                store.queue_first_run_notice(first_run_notice(settings), audience)
         surface = platform or ctx.session_surface()
         local = surface in LOCAL_SURFACES
         # The turn's chat, read only when a notice waits for this sender on this platform.
@@ -225,10 +229,11 @@ def _still_hidden(skill: str, model: str) -> str:
 def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None, recheck: bool = False) -> str:
     """What the user is told about one automatic trial; ``proposed``: the appeal tried after a
     ``hurts`` verdict, if any; ``recheck``: the trial ran because a session used the skill on a model
-    that had no verdict on it."""
+    that had no verdict on its current version."""
     score, model = outcome.score, outcome.model
     evidence = trial.describe_sources(outcome.sources, outcome.mode)
-    head = f"Skill Court (you used `{skill}` on {model}, which it was never tested on)" if recheck else "Skill Court"
+    head = (f"Skill Court (you used `{skill}` on {model}; this version was never tested on {model})" if recheck
+            else "Skill Court")
     if score.verdict == scoring.HURTS:
         what = (f"made {model} fail {outcome.failed_with} of {outcome.solved_without} task(s) it solved without it"
                 if outcome.failed_with else f"hurt {model}: {score.reason}")

@@ -52,8 +52,9 @@ def setup(parser: argparse.ArgumentParser) -> None:
     t.add_argument("--apply", action="store_true", help="Quarantine skills judged harmful, for that model")
     t.add_argument("--keep-sandboxes", action="store_true", help="Keep the replay profiles afterwards")
     t.add_argument("--answer-only", action="store_true",
-                   help="Replay without Docker sandboxes: read-only tools only, every pair judged on the final "
-                        "answers (what happens anyway when no container runtime answers)")
+                   help="Replay without Docker sandboxes: only the skills, todo and web tools, every pair judged on "
+                        "the final answers, success alone deciding the verdict (what happens anyway when no "
+                        "container runtime answers)")
     t.add_argument("--auto", action="store_true",
                    help="Run the automatic-trial queue (what auto mode starts in the background): it spends "
                         "from the daily budget and judge tokens instead of --budget, always quarantines a harmful "
@@ -172,8 +173,8 @@ def _mode(answer_only: bool) -> str:
     why = arms.sandbox_unavailable()
     if why is None:
         return arms.SANDBOX
-    print(f"No Docker sandbox ({why}); replays run answer-only: read-only tools, every pair judged on the final "
-          "answers.")
+    print(f"No Docker sandbox ({why}); replays run answer-only: only the skills, todo and web tools, every pair "
+          "judged on the final answers, success alone deciding the verdict.")
     return arms.ANSWER_ONLY
 
 
@@ -210,7 +211,8 @@ def _try_skills(source: str, library: dict[str, skills.Skill], selected: dict[st
     return done
 
 
-def _print_results(done: list[tuple[str, trial.Outcome]], budget: trial.Budget) -> None:
+def _print_results(done: list[tuple[str, trial.Outcome]], budget: trial.Budget, judge: Judge) -> None:
+    """``judge``: the command's judge, whose tokens include drafting and trying an appeal's fix."""
     rows = [[name, o.model, o.score.verdict, str(o.score.tasks), trial.describe_sources(o.sources, o.mode),
              f"{_pct(o.score.success_without)} → {_pct(o.score.success_with)}", _signed(o.score.token_change),
              "yes" if o.quarantined else ""] for name, o in done]
@@ -220,9 +222,8 @@ def _print_results(done: list[tuple[str, trial.Outcome]], budget: trial.Budget) 
                             "quarantined"]))
     unpriced = f"; {budget.unpriced} run(s) reported no price" if budget.unpriced else ""
     print(f"\nSpent at least ${budget.spent:.2f} of ${budget.limit:.2f} on replays{unpriced}.")
-    judged = sum(o.judge_tokens for _, o in done)
-    if judged:
-        print(f"The judge ({JUDGE_TASK}) used {judged:,} tokens, which are not part of that replay spend.")
+    if judge.tokens:
+        print(f"The judge ({JUDGE_TASK}) used {judge.tokens:,} tokens, which are not part of that replay spend.")
 
 
 def _cmd_trial(args: argparse.Namespace, llm: Any) -> int:
@@ -259,10 +260,11 @@ def _cmd_trial(args: argparse.Namespace, llm: Any) -> int:
         return 1
 
     budget = trial.Budget(args.budget, args.allow_unpriced)
+    judge = Judge(llm)
     with _trial_lock():
-        done = _try_skills(source, library, selected, _options(args, args.apply), budget, Judge(llm), disabled,
+        done = _try_skills(source, library, selected, _options(args, args.apply), budget, judge, disabled,
                            mode=mode, auto_mode=False, keep=args.keep_sandboxes)
-    _print_results(done, budget)
+    _print_results(done, budget, judge)
     return 0
 
 
@@ -308,16 +310,10 @@ def _run_auto_queue(args: argparse.Namespace, llm: Any) -> int:
 
 
 def _by_use(claimed: list[store.Queued]) -> list[store.Queued]:
-    """Changes first, then re-checks, the skill used in the most sessions on that model first, so the
-    daily budget goes where the skill is used most."""
-    rechecks = [q for q in claimed if q.model]
-    used = usage.scan(frozenset(q.skill for q in rechecks)) if rechecks else {}
-
-    def sessions_on(q: store.Queued) -> int:
-        found = used.get(q.skill, {}).get(q.model)
-        return found.sessions if found else 0
-
-    return [q for q in claimed if not q.model] + sorted(rechecks, key=lambda q: (-sessions_on(q), q.skill, q.model))
+    """Changes first, then re-checks, the skill loaded on that model in the most sessions since it was
+    queued first, so the daily budget goes where the skill is used most."""
+    rechecks = sorted((q for q in claimed if q.model), key=lambda q: (-len(q.sessions), q.skill, q.model))
+    return [q for q in claimed if not q.model] + rechecks
 
 
 def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[str, str], list[store.Origin]],
@@ -348,6 +344,7 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
     judge = Judge(llm, settings.daily_judge_tokens)
     library = skills.library()
     disabled = arms.source_disabled_skills(source)
+    profile_model = opts.model or arms.source_model(source)
     budget = trial.Budget(left, allow_unpriced=False)
 
     def attempt(q: store.Queued) -> list[tuple[str, trial.Outcome]] | None:
@@ -356,8 +353,11 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
         if name not in library:
             store.finish_queued(name, q.model, None, "the skill no longer exists")
             return None
-        if q.model and store.has_verdict(name, library[name].content_hash(), q.model):
-            store.finish_queued(name, q.model, None, f"its current version has a verdict on {q.model}")
+        # A version already judged on the model is not tried again (a re-check, or a change that an
+        # earlier batch's re-check on the profile's model already covered).
+        model = q.model or profile_model
+        if model and store.has_verdict(name, library[name].content_hash(), model):
+            store.finish_queued(name, q.model, None, f"its current version has a verdict on {model}")
             return None
         if budget.exhausted:
             return []
@@ -404,7 +404,7 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
             auto.notify(audience[(q.skill, q.model)], None, f"Skill Court: `{q.skill}` was not tested automatically: "
                                                             f"{budget.why_stopped()}. Run `{command} --allow-unpriced` "
                                                             "to test it yourself.")
-    _print_results(done, budget)
+    _print_results(done, budget, judge)
     return True
 
 
@@ -444,9 +444,10 @@ def _cmd_report() -> int:
         print("\njudged: no check, so a blind judge compared both runs' answers and files in both orders; a run "
               "fails only when the judge preferred the other run both times.")
     if answer_only:
-        print("answer-only: no Docker sandbox, so the replays had read-only tools only and every pair was judged on "
-              "the final answers. It measures what the skill makes the agent say or decide, not procedures that "
-              "need tools.")
+        print("answer-only: no Docker sandbox, so the replays had only the skills, todo and web tools, every pair was "
+              "judged on the final answers, and success alone decided the verdict (a skill load costs a short run a "
+              "large share of its tokens). It measures what the skill makes the agent say or decide, not "
+              "procedures that need tools.")
     in_use = _usage_lines({t["skill"] for t in trials} | {s.name for s in library.values() if s.agent_authored})
     if in_use:
         print(f"\nIn use ({usage.LABEL}):")
@@ -561,17 +562,17 @@ def _cmd_auto(args: argparse.Namespace) -> int:
               "the agent wrote on a model that has no verdict on its current version while another model has one. "
               f"Skill Court waits until that session ends (or {settings.quiet_minutes:g} minutes pass without "
               "another change), then replays the skill's tasks with and without it in the background: in Docker "
-              "sandboxes when a container runtime answers, else answer-only (read-only tools, every pair judged on "
-              f"the final answers). Right now that would be {_mode_now()}.\n"
+              "sandboxes when a container runtime answers, else answer-only (only the skills, todo and web tools, "
+              f"every pair judged on the final answers). Right now that would be {_mode_now()}.\n"
               f"Spending: replays stop for the day at ${settings.daily_budget_usd:.2f} of provider-reported spend "
               "(change it with --budget), and stop at once if a run reports no price. The judge's calls for tasks "
               f"without a check (auxiliary task {JUDGE_TASK}) may use {settings.daily_judge_tokens:,} tokens a day "
               f"(default {store.AUTO_DEFAULTS.daily_judge_tokens:,}; change it with --judge-tokens); they count "
               "toward the dollar budget only if Hermes reports their price.\n"
-              "A skill that hurts a model (the model succeeds less often with it, or uses at least 25% more tokens "
-              "at equal success) is hidden from that model; when a later version no longer hurts, that quarantine "
-              "is lifted. The verdict is posted at the start of the next turn of the session that changed or used "
-              "the skill, or of the same sender's next session in the same chat; sessions in the CLI, TUI or "
+              "A skill that hurts a model (the model succeeds less often with it, or, in sandboxes, uses at least 25% "
+              "more tokens at equal success) is hidden from that model; when a later version no longer hurts, that "
+              "quarantine is lifted. The verdict is posted at the start of the next turn of the session that changed "
+              "or used the skill, or of the same sender's next session in the same chat; sessions in the CLI, TUI or "
               "Desktop are posted there. Undo a quarantine with: hermes court release <skill> --model <model>. "
               "Stop with: hermes court auto off")
         return 0

@@ -172,8 +172,8 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
     ),
     # 6: answer-only trials, re-checks on the model a skill was used on, and the first-run notice.
     (
-        # ``sandbox``: replays in Docker sandboxes, checks run there. ``answer-only``: no sandbox and
-        # read-only tools only, every pair judged on the final answers.
+        # ``sandbox``: replays in Docker sandboxes, checks run there. ``answer-only``: no sandbox, only
+        # the skills, todo and web tools, every pair judged on the final answers.
         "ALTER TABLE trials ADD COLUMN mode TEXT NOT NULL DEFAULT 'sandbox'",
         # The queue gains the model its trial runs on: '' for a change (the profile's model), or the
         # model a session loaded the skill on (a re-check), with that session's provider. The primary
@@ -494,7 +494,8 @@ class AutoSettings:
     daily_judge_tokens: int
 
 
-# A new install tests skills automatically within $1.00 a day; ``auto off`` or ``auto on`` stores a row.
+# A new install tests skills automatically on a $1.00 daily replay budget; ``auto off`` or ``auto on``
+# stores a row.
 AUTO_DEFAULTS = AutoSettings(enabled=True, daily_budget_usd=1.0, quiet_minutes=15.0, daily_judge_tokens=300_000)
 
 
@@ -718,15 +719,16 @@ def first_run_due() -> bool:
         return bool(conn.execute(_FIRST_RUN_DUE).fetchone()[0])
 
 
-def queue_first_run_notice(text: str, origin: Origin) -> bool:
-    """Queue the first-run notice for ``origin`` if it is still due; False otherwise. The write lock
-    is taken before the check is repeated, so two sessions starting at once queue it once."""
+def queue_first_run_notice(text: str, audience: list[Origin]) -> bool:
+    """Queue the first-run notice, one copy per origin in ``audience``, if it is still due; False
+    otherwise. The write lock is taken before the check is repeated, so two sessions starting at once
+    queue it once."""
     with closing(_connect()) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         if not conn.execute(_FIRST_RUN_DUE).fetchone()[0]:
             return False
-        notice_id = _insert_notice(conn, None, text, origin)
-        conn.execute("INSERT INTO first_run (id, notice_id, created_at) VALUES (1, ?, ?)", (notice_id, _now()))
+        notice_ids = [_insert_notice(conn, None, text, origin) for origin in audience]
+        conn.execute("INSERT INTO first_run (id, notice_id, created_at) VALUES (1, ?, ?)", (notice_ids[0], _now()))
         return True
 
 

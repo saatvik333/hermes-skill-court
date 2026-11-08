@@ -241,6 +241,8 @@ class Judge:
         it makes none once today's automatic judge calls have used that many tokens."""
         self._llm = llm
         self._daily_tokens = daily_tokens
+        # Every call's tokens (comparisons, causes, drafts), whether or not its answer was usable.
+        self.tokens = 0
 
     def _ask(self, system: str, parts: list[tuple[str, str]], schema: dict, name: str) -> tuple[dict, str, int]:
         cap = self._daily_tokens
@@ -253,6 +255,7 @@ class Judge:
             system_prompt=system, json_schema=schema, schema_name=f"skill_court.{name}", temperature=0, task=TASK,
             purpose=f"skill-court.{name}")
         tokens = result.usage.total_tokens
+        self.tokens += tokens
         # Hermes 0.23 reports no price for plugin calls (``cost_usd`` stays None); a host that does
         # gets them counted in the daily budget of automatic trials.
         store.record_judge_call(name, result.model, tokens, getattr(result.usage, "cost_usd", None), cap is not None)

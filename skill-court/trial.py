@@ -118,9 +118,11 @@ FIRST_WAVE = 4
 
 
 def adjudicate(tasks: list[store.Task], replay: Replay, opts: Options, budget: Budget, record: Record,
-               say: Callable[[str], None], outcome: PairOutcome = check_outcome) -> tuple[scoring.Score, Counter]:
+               say: Callable[[str], None], outcome: PairOutcome = check_outcome,
+               efficiency: bool = True) -> tuple[scoring.Score, Counter]:
     """Replay ``tasks`` in both arms and score the pairs. ``replay(task, arm)`` runs one arm once;
-    ``record`` sees every result; ``outcome`` turns each finished pair into its two successes.
+    ``record`` sees every result; ``outcome`` turns each finished pair into its two successes;
+    ``efficiency``: whether token use can decide the verdict (``scoring.score``).
     The first ``FIRST_WAVE`` tasks run first; the rest run only when those leave something to settle.
     Returns the score and how often each model answered."""
     chosen = tasks[: opts.tasks]
@@ -164,13 +166,14 @@ def adjudicate(tasks: list[store.Task], replay: Replay, opts: Options, budget: B
 
     first, rest = chosen[:FIRST_WAVE], chosen[FIRST_WAVE:]
     run_wave(first)
-    if rest and scoring.settled_early(list(pairs.values())):
-        say(f"  stopped after {len(first)} task(s): every pair ended the same way in both arms and token use "
-            f"stayed within the efficiency margin, so the other {len(rest)} were not run")
+    if rest and scoring.settled_early(list(pairs.values()), efficiency=efficiency):
+        margin = " and token use stayed within the efficiency margin" if efficiency else ""
+        say(f"  stopped after {len(first)} task(s): every pair ended the same way in both arms{margin}, so the "
+            f"other {len(rest)} were not run")
     elif rest:
         run_wave(rest)  # past the budget it only reports the pairs it could not run
     observed = Counter(r.model for by_arm in results.values() for r in by_arm.values() if r.model)
-    return scoring.score(list(pairs.values())), observed
+    return scoring.score(list(pairs.values()), efficiency=efficiency), observed
 
 
 def _regressions(decided: dict[tuple[int, int], tuple[bool, bool]]) -> tuple[int, int]:
@@ -236,7 +239,10 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
                 decided[(task.id, rep)] = (pair[0], pair[1])
             return pair
 
-        score, observed = adjudicate(tasks, replay, opts, budget, record, say, outcome)
+        # Answer-only runs are a call or two each, so the call that loads the skill would decide a
+        # token verdict on its own: only success counts there.
+        score, observed = adjudicate(tasks, replay, opts, budget, record, say, outcome,
+                                     efficiency=arms.mode == SANDBOX)
     model = observed.most_common(1)[0][0] if observed else model
 
     cause = quote = None

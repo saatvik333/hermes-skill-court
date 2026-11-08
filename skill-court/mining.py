@@ -127,10 +127,12 @@ def session_origin(session_id: str) -> tuple[str | None, str | None, str | None]
     return row.get("source") or None, row.get("user_id") or None, row.get("chat_id") or None
 
 
-def sessions() -> Iterator[tuple[dict, list[dict]]]:
-    """Every session of the active profile (including continuations and subagents) with its
-    messages; nothing for a profile that never ran a session. Wrap in ``contextlib.closing`` when
-    stopping early, so the database is closed then."""
+def sessions(limit: int | None = None, include_compacted: bool = False) -> Iterator[tuple[dict, list[dict]]]:
+    """The active profile's sessions (including continuations and subagents), newest first, with their
+    messages: every one, or the ``limit`` most recently started. ``include_compacted``: also the turns
+    an in-place compaction archived (Hermes' display history), not only those still in context.
+    Nothing for a profile that never ran a session. Wrap in ``contextlib.closing`` when stopping
+    early, so the database is closed then."""
     from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
 
@@ -139,13 +141,14 @@ def sessions() -> Iterator[tuple[dict, list[dict]]]:
     db = SessionDB(read_only=True)
     try:
         offset = 0
-        while page := db.list_sessions_rich(
-                limit=_PAGE, offset=offset, include_children=True, project_compression_tips=False,
-                include_hidden=True, include_subagents=True, order_by_last_active=False):
+        while (limit is None or offset < limit) and (page := db.list_sessions_rich(
+                limit=_PAGE if limit is None else min(_PAGE, limit - offset), offset=offset, include_children=True,
+                project_compression_tips=False, include_hidden=True, include_subagents=True,
+                order_by_last_active=False)):
             offset += len(page)
             for session in page:
                 if session.get("id"):
-                    yield session, db.get_messages(session["id"])
+                    yield session, db.get_messages(session["id"], include_compacted=include_compacted)
     finally:
         db.close()
 
