@@ -173,9 +173,12 @@ off. Then:
    there, including skills written before Skill Court was installed, or not since it last changed),
    the skill is queued for a trial on that model (a **re-check**), with the session's provider. A
    re-check is queued once per session and model. No trial runs for a version that already has a
-   verdict on its model, whether it was queued as a change or a re-check. An `inconclusive` trial
-   that today's budget, the judge's token cap or a failing judge cut short is not a verdict; one cut
-   short by the budget or the token cap waits for the next day's and runs again, and its notice says so.
+   verdict on its model, whether it was queued as a change or a re-check. A re-check with fewer than
+   three tasks records nothing and waits: it runs once enough sessions have used the skill for three
+   tasks (`auto status` shows "waiting for more tasks"). An `inconclusive` trial cut short by today's
+   budget or the judge's token cap is not a verdict: it waits for the next day's and runs again, and
+   its notice says so. One that stopped because the provider reported no price or the judge failed
+   does count for that version, so it is not retried unattended; its notice says how to retry it.
 2. When that session ends (`on_session_finalize`), or once it has gone 15 minutes without another
    change while the session stays open (`--quiet-minutes`, checked at the start of each turn), a
    background `hermes -p <profile> court trial --auto` starts. It waits for any trial already
@@ -485,7 +488,8 @@ hermes -p courtlab court report
   prompt and this data in the user message, inside tags marked for each call.
 - **What a replay profile changes from your profile:** in both modes, egress proxy off (its
   credentials belong to your profile and are not cloned); no MCP servers, external memory provider,
-  other plugins or shell hooks; inline shell in skills (`skills.inline_shell`) off, since it runs on
+  other plugins, context engine other than Hermes' built-in compressor (`context.engine`), or shell
+  hooks; inline shell in skills (`skills.inline_shell`) off, since it runs on
   the host; skill edits staged rather than applied. **Sandbox mode:** Docker backend with one fresh
   container per run; no host directories mounted, no extra `docker run` flags, no container env, no
   forwarded host env and no `env_passthrough`; and these toolsets turned off: code execution,
