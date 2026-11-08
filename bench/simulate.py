@@ -1,9 +1,10 @@
 """Verdict-quality benchmark: Skill Court's own trial scheduler and scoring, fed simulated replays.
 
 Every simulated skill has a known true effect, so each verdict can be graded. The replays come from
-a fixed-seed model of real trials: tasks of mixed difficulty, skills that touch only some tasks,
-noisy token use, and runs that end with no outcome. The trial code under test is the plugin's real
-``trial.adjudicate`` and ``scoring.score``; only ``replay`` is simulated.
+a fixed-seed model of real trials (three seeds of 3,000 skills): tasks of mixed difficulty, skills
+that touch only some tasks, noisy token use, and runs that end with no outcome. The trial code
+under test is the plugin's real ``trial.adjudicate`` and ``scoring.score``; only ``replay`` is
+simulated.
 
 Output: ``METRIC`` lines. Exit 1 when the safety gate fails (harmless skills quarantined too often).
 """
@@ -23,8 +24,10 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-SEED = 20261108
-SKILLS = int(os.environ.get("COURT_SIM_SKILLS", "3000"))
+# Three independent draws of the skill population: a policy change has to win on all of them
+# together, not on one lucky set of 3,000 skills.
+SEEDS = (20261108, 20261109, 20261110)
+SKILLS = int(os.environ.get("COURT_SIM_SKILLS", "3000"))  # per seed
 POOL = 8  # tasks registered per skill
 NO_OUTCOME = 0.03  # chance a run ends with no outcome (provider error, timeout)
 REPLAY_COST = 0.02  # loss per replay: 50 replays cost as much as one missed-harm-as-neutral
@@ -118,10 +121,11 @@ def _scenario(rng: random.Random) -> tuple[list[float], list[float], list[float]
     return p0, p1, base_tokens, mult, Truth(label, delta, mult)
 
 
-def _judge(index: int) -> tuple[str, str, int]:
+def _judge(case: tuple[int, int]) -> tuple[str, str, int]:
     """One simulated skill on trial: (truth label, verdict, replays used)."""
     runner, store, trial = _MODULES
-    rng = random.Random(f"{SEED}:{index}")
+    seed, index = case
+    rng = random.Random(f"{seed}:{index}")
     p0, p1, base_tokens, mult, truth = _scenario(rng)
     tasks = [store.Task(i, "sim", f"task {i}", "check", "manual", None) for i in range(POOL)]
     replays = Counter()
@@ -129,7 +133,7 @@ def _judge(index: int) -> tuple[str, str, int]:
     def replay(task, arm: str):
         k = replays[(task.id, arm)]
         replays[(task.id, arm)] += 1
-        draw = random.Random(f"{SEED}:{index}:{task.id}:{arm}:{k}")
+        draw = random.Random(f"{seed}:{index}:{task.id}:{arm}:{k}")
         tokens = int(base_tokens[task.id] * (mult if arm == "with" else 1.0) * math.exp(draw.gauss(0, 0.35)))
         if draw.random() < NO_OUTCOME:
             return runner.RunResult(error="simulated provider error", tokens=tokens // 4, cost_usd=0.0)
@@ -156,9 +160,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="court-sim-") as home:
         workers = max(1, (os.cpu_count() or 2) - 1)
         with ProcessPoolExecutor(workers, initializer=_init_worker, initargs=(home,)) as pool:
-            results = list(pool.map(_judge, range(SKILLS), chunksize=64))
+            cases = [(seed, index) for seed in SEEDS for index in range(SKILLS)]
+            results = list(pool.map(_judge, cases, chunksize=64))
 
-    loss = sum(LOSS[t][v] + REPLAY_COST * n for t, v, n in results) / SKILLS
+    total = len(results)
+    loss = sum(LOSS[t][v] + REPLAY_COST * n for t, v, n in results) / total
     harmless = [(t, v) for t, v, _ in results if t in (HELPS, NEUTRAL, GRAY_POS)]
     harmful = [(t, v) for t, v, _ in results if t == HURTS]
     helpful = [(t, v) for t, v, _ in results if t == HELPS]
@@ -167,8 +173,8 @@ def main() -> int:
     missed = 100 * sum(v != HURTS for _, v in harmful) / len(harmful)
     found_help = 100 * sum(v == HELPS for _, v in helpful) / len(helpful)
     accuracy = 100 * sum(t == v for t, v in clear) / len(clear)
-    inconclusive = 100 * sum(v == INCONCLUSIVE for _, v, _ in results) / SKILLS
-    replays = sum(n for *_, n in results) / SKILLS
+    inconclusive = 100 * sum(v == INCONCLUSIVE for _, v, _ in results) / total
+    replays = sum(n for *_, n in results) / total
 
     print(f"METRIC loss={loss:.4f}")
     print(f"METRIC false_quarantine_pct={false_q:.2f}")
