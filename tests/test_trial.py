@@ -92,6 +92,26 @@ def test_a_trial_the_budget_cut_short_is_no_verdict_but_one_with_too_few_tasks_i
     assert store.has_verdict(skill.name, skill.content_hash(), MODEL)
 
 
+def test_a_trial_stops_for_the_judge_cap_only_when_its_own_judge_calls_were_refused(skill):
+    arms_ = Arms("default", {"with": "w", "without": "wo"}, SANDBOX)
+    judge = Judge(None)
+    judge.capped = True  # an earlier trial in the batch used up today's judge tokens
+    short = trial.run(skill, store.tasks_for(skill.name)[:1], arms_, MODEL, trial.Options(), trial.Budget(5.0, False),
+                      lambda _line: None, judge, auto=True)
+    # Checked tasks need no judge: too few tasks is the reason, and that version counts as tried.
+    assert (short.score.verdict, short.stopped) == (scoring.INCONCLUSIVE, None)
+    assert store.has_verdict(skill.name, skill.content_hash(), MODEL)
+
+
+def test_a_trial_stopped_for_want_of_a_price_counts_so_it_is_not_retried_unattended(skill, monkeypatch):
+    monkeypatch.setattr(trial.runner, "replay", lambda *_args, **_kwargs: RunResult(
+        model=MODEL, completed=True, passed=True, tokens=1_000, cost_usd=None))
+    unpriced = trial.run(skill, store.tasks_for(skill.name), Arms("default", {"with": "w", "without": "wo"}, SANDBOX),
+                         MODEL, trial.Options(), trial.Budget(5.0, False), lambda _line: None, Judge(None), auto=True)
+    assert (unpriced.score.verdict, unpriced.stopped) == (scoring.INCONCLUSIVE, trial.NO_PRICE)
+    assert store.has_verdict(skill.name, skill.content_hash(), MODEL)
+
+
 def test_a_changed_skill_that_no_longer_hurts_gets_the_courts_quarantine_lifted(skill):
     store.quarantine(skill.name, MODEL, f"{store.COURT_REASON}4: success fell from 100% to 0%")
     store.quarantine(skill.name, "other-model", f"{store.COURT_REASON}5: success fell")
