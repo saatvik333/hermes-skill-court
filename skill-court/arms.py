@@ -30,6 +30,7 @@ from pathlib import Path
 from hermes_constants import get_default_hermes_root
 
 from .procs import CommandError, container_binary, hermes, run
+from .store import PLUGIN
 
 ARMS = ("with", "without")
 SANDBOX, ANSWER_ONLY = "sandbox", "answer-only"
@@ -180,12 +181,18 @@ def _build(source: str, profile: str, mode: str) -> None:
         hermes("-p", profile, "config", "set", key, value, "--force")
     if mode == SANDBOX:
         hermes("-p", profile, "tools", "disable", *_SANDBOX_DISABLED_TOOLSETS)
-        return
-    from agent.skill_utils import parse_config_string_list
+    else:
+        from agent.skill_utils import parse_config_string_list
 
-    already = parse_config_string_list(_config_json(profile, "agent.disabled_toolsets"))
-    hermes("-p", profile, "config", "set", "agent.disabled_toolsets", json.dumps(answer_only_disabled(already)),
-           "--force")
+        already = parse_config_string_list(_config_json(profile, "agent.disabled_toolsets"))
+        hermes("-p", profile, "config", "set", "agent.disabled_toolsets", json.dumps(answer_only_disabled(already)),
+               "--force")
+    # A gateway that serves every profile (``gateway.multiplex_profiles``) runs the replays' turns. It
+    # loaded the clone's plugins, Skill Court among them, as soon as the profile appeared, and keeps
+    # them through a config change (and across a profile deleted and created again under the same
+    # name). Disabling Skill Court makes that gateway discover the profile's plugins again, under
+    # ``plugins.enabled: []``; with no gateway running it only edits the config.
+    hermes("-p", profile, "plugins", "disable", PLUGIN)
 
 
 def prepare(arms: Arms) -> None:

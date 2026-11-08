@@ -156,6 +156,15 @@ def test_a_sandbox_replay_runs_its_tools_in_docker(monkeypatch, hermes_toolsets)
     assert ("-p", "court-1a2b3c4d-with", "tools", "disable", *arms._SANDBOX_DISABLED_TOOLSETS) in commands
 
 
+def test_a_running_gateway_drops_the_replays_plugins_once_the_profile_is_set_up(monkeypatch, hermes_toolsets):
+    # A gateway serving every profile loads a clone's plugins when it appears and keeps them through
+    # `config set`; disabling Skill Court, last, makes it discover them again under `plugins.enabled: []`.
+    for mode in (arms.SANDBOX, arms.ANSWER_ONLY):
+        _, commands = build(monkeypatch, mode)
+        assert commands[-1] == ("-p", "court-1a2b3c4d-with", "plugins", "disable", "skill-court")
+        assert ("-p", "court-1a2b3c4d-with", "config", "set", "plugins.enabled", "[]", "--force") in commands
+
+
 def test_an_answer_only_trial_removes_sandboxes_a_killed_run_left_when_docker_answers(hermes_home, monkeypatch):
     replay = arms.for_source("work", arms.ANSWER_ONLY)
     for profile in replay.profiles.values():
