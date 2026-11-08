@@ -174,16 +174,17 @@ Off until you turn it on. Then:
    ```
    Skill Court: `sales-export-totals` made claude-sonnet-5-5 fail 5 of 5 task(s) it solved without it (5 judged).
    Hidden for claude-sonnet-5-5; `hermes court release sales-export-totals --model claude-sonnet-5-5` shows it again.
-   Why: The skill made the agent add a cents-to-dollars conversion and the arithmetic line to a request for
-   just the number, asserting a unit the export never stated instead of giving the bare total.
-   Skill line: "- The user asks "just the number": give the bare total, but state the unit so it is not
-   misread, e.g. `3748 cents ($37.48)`. No other commentary."
+   Why: The skill made the agent assume amounts are cents and convert the total to $37.48, though the
+   CSV header just says amount with no unit; it also added the arithmetic line despite "just the number".
+   Skill line: "- This user's sales exports store `amount` in CENTS, not dollars. Never treat the raw sum
+   as dollars."
    Fix proven: the draft no longer hurts (neutral) and succeeded on 80% of tasks, up from 0% with the
    original. See it with `hermes court appeal show sales-export-totals --model claude-sonnet-5-5`, apply
    it with `hermes court appeal apply sales-export-totals --model claude-sonnet-5-5`.
    ```
 
-   (The run printed these as one paragraph; the line breaks shown are the current format.)
+   The fix kept the cents rule only for exports whose header or user says cents. Applied from the
+   Desktop page, it left the skill neutral (60% → 80%) and nothing quarantined.
 
 **How it spends money.** Every automatic trial is real replays on your provider, plus judge calls.
 Replays stop for the day once the provider-reported spend of today's automatic trials reaches the
