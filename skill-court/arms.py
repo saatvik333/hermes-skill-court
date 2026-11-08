@@ -12,15 +12,15 @@ A clone runs in one of two modes:
   on the host or keep state between replays (code execution, browser, computer use, cron, memory
   writes, session search, connections) and media generation are turned off.
 - ``answer-only``, for when no container runtime answers: only the tools of the toolsets in
-  ``ANSWER_ONLY_TOOLSETS`` are left. Every other toolset Hermes knows whose tools are all outside
-  them is disabled, including ones added to Hermes later; a toolset that mixes allowed tools with
-  others (``coding``, ``hermes-cli``) stays listed, its other tools removed with the basic toolsets
-  that hold them, and the build is refused if any would remain. Nothing a replay does can touch the
-  host.
+  ``ANSWER_ONLY_TOOLSETS`` are left. Every other toolset Hermes' tool registry files a built-in tool
+  under is disabled, including ones added to Hermes later; Hermes removes a disabled toolset's tools
+  one by one, so a bundle such as ``coding`` keeps only the allowed tools. Nothing a replay does can
+  touch the host.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -106,21 +106,34 @@ def sandbox_unavailable() -> str | None:
 
 def answer_only_disabled(already: list[str]) -> list[str]:
     """``agent.disabled_toolsets`` for an answer-only replay: the user's own (``already``) and every
-    toolset Hermes knows whose tools all lie outside ``ANSWER_ONLY_TOOLSETS``. Hermes subtracts this
-    list last, whatever turned a toolset on (the platform list, the coding posture, a context
-    engine), so only the allowed toolsets' tools remain. Refused when some tool outside them would
-    still be left, which only a toolset mixing allowed and other tools could do."""
-    from toolsets import get_toolset_names, resolve_toolset
+    toolset outside ``ANSWER_ONLY_TOOLSETS`` that Hermes' public tool registry files a built-in tool
+    under (each tool belongs to one). Hermes subtracts this list last, tool by tool, whatever turned a
+    toolset on (the platform list, the coding posture, a context engine), so only the allowed
+    toolsets' tools remain. Refused when the registry lists none of the allowed toolsets, since then
+    it cannot have listed the others either."""
+    from tools.registry import discover_builtin_tools, registry
 
-    allowed = {tool for name in ANSWER_ONLY_TOOLSETS for tool in resolve_toolset(name)}
-    names = get_toolset_names()
-    off = [name for name in names if name not in ANSWER_ONLY_TOOLSETS and not allowed & set(resolve_toolset(name))]
-    left = {tool for name in names for tool in resolve_toolset(name)} - allowed
-    left -= {tool for name in off for tool in resolve_toolset(name)}
-    if left:
-        raise CommandError(f"answer-only replays cannot turn off {', '.join(sorted(left))} without turning off "
-                           f"{', '.join(ANSWER_ONLY_TOOLSETS)} too; no replay was run")
-    return sorted({*already, *off})
+    discover_builtin_tools()
+    toolsets = set(registry.get_tool_to_toolset_map().values())
+    if not toolsets & set(ANSWER_ONLY_TOOLSETS):
+        raise CommandError(f"Hermes' tool registry lists none of the {', '.join(ANSWER_ONLY_TOOLSETS)} toolsets, so "
+                           "the toolsets to turn off are unknown; no replay was run")
+    return sorted({*already, *(toolsets - set(ANSWER_ONLY_TOOLSETS))})
+
+
+def _string_list(value) -> list[str]:
+    """A config value Hermes reads as a list of names: a list, a ``[a, b]`` string, or one name (the
+    rule of Hermes 0.23's ``parse_config_string_list``)."""
+    if isinstance(value, str):
+        if value.strip().startswith("["):
+            try:
+                parsed = ast.literal_eval(value.strip())
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return [value]
+    return [str(item) for item in value] if isinstance(value, (list, tuple, set, frozenset)) else []
 
 
 def profile_home(name: str) -> Path:
@@ -182,9 +195,7 @@ def _build(source: str, profile: str, mode: str) -> None:
     if mode == SANDBOX:
         hermes("-p", profile, "tools", "disable", *_SANDBOX_DISABLED_TOOLSETS)
     else:
-        from agent.skill_utils import parse_config_string_list
-
-        already = parse_config_string_list(_config_json(profile, "agent.disabled_toolsets"))
+        already = _string_list(_config_json(profile, "agent.disabled_toolsets"))
         hermes("-p", profile, "config", "set", "agent.disabled_toolsets", json.dumps(answer_only_disabled(already)),
                "--force")
     # A gateway that serves every profile (``gateway.multiplex_profiles``) runs the replays' turns. It

@@ -243,10 +243,13 @@ class Judge:
         self._daily_tokens = daily_tokens
         # Every call's tokens (comparisons, causes, drafts), whether or not its answer was usable.
         self.tokens = 0
+        # Whether a call was refused because today's automatic judge tokens were used up.
+        self.capped = False
 
     def _ask(self, system: str, parts: list[tuple[str, str]], schema: dict, name: str) -> tuple[dict, str, int]:
         cap = self._daily_tokens
         if cap is not None and (used := store.auto_judge_tokens_today()) >= cap:
+            self.capped = True
             raise JudgeError(f"today's judge tokens for automatic trials are used up ({used:,} of {cap:,})")
         # Drawn per call, so nothing a run wrote can close its tag or open one of its own.
         marker = secrets.token_hex(8)

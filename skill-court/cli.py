@@ -372,7 +372,11 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
         claim_opts = replace(opts, model=q.model, provider=q.provider) if q.model else opts
 
         def close(name: str, outcome: trial.Outcome) -> None:
-            store.finish_queued(name, q.model, outcome.trial_id, outcome.score.verdict)
+            if outcome.stopped == trial.BUDGET:
+                # Cut short by today's budget or judge tokens: it waits for tomorrow's.
+                store.defer_queued(name, q.model, "waiting for tomorrow's budget")
+            else:
+                store.finish_queued(name, q.model, outcome.trial_id, outcome.score.verdict)
             proposed = None
             # A harmful skill with a recorded cause gets a drafted fix tried on its tasks, within the
             # same budget. It is never applied without the user.
@@ -559,7 +563,8 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         store.set_auto_settings(settings)
         print(f"Automatic trials are on for profile {source}.\n"
               "A skill goes on trial after the agent creates, patches or edits it, and when a session uses a skill "
-              "the agent wrote on a model that has no verdict on its current version while another model has one. "
+              "the agent wrote (before or after Skill Court was installed) on a model that has no verdict on its "
+              "current version. "
               f"Skill Court waits until that session ends (or {settings.quiet_minutes:g} minutes pass without "
               "another change), then replays the skill's tasks with and without it in the background: in Docker "
               "sandboxes when a container runtime answers, else answer-only (only the skills, todo and web tools, "

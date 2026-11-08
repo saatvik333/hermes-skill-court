@@ -1,5 +1,6 @@
 import argparse
 import fcntl
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -410,27 +411,55 @@ def finished(skill, skill_hash, model):
 
 
 def test_a_skill_used_on_a_model_with_no_verdict_on_its_version_is_queued_for_that_model(monkeypatch):
-    version = {"csv-totals": "v1", "json-format": "v1", "hub-skill": "v1"}
+    version = {"csv-totals": "v1", "json-format": "v1", "hub-skill": "v1", "written-before-install": "v1"}
     monkeypatch.setattr(auto.skills, "find", lambda name: SimpleNamespace(
         name=name, agent_authored=name != "hub-skill", content_hash=lambda: version[name]))
 
     def load(skill, session, model):
         quarantine.on_llm_request(session_id=session, model=model, provider="anthropic")
         auto.on_skill_lifecycle(action="loaded", skill_name=skill, session_id=session)
-        return [(r["skill"], r["session_id"], r["model"], r["provider"]) for r in rows()]
+        return [(r["skill"], r["session_id"], r["model"]) for r in rows()]
 
-    for skill in version:
+    for skill in ("csv-totals", "json-format", "hub-skill"):
         finished(skill, "v1", MODEL)
-    assert load("csv-totals", "h-1", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]
-    assert load("csv-totals", "h-1", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]  # once per session
-    assert load("csv-totals", "s-1", MODEL) == [("csv-totals", "h-1", HAIKU, "anthropic")]  # it has a verdict there
-    assert load("hub-skill", "h-2", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]  # not written by the agent
-    assert load("never-tried", "h-2", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]
-    # Dedupe: this version has a verdict on Haiku now, so another Haiku session queues nothing.
-    finished("csv-totals", "v1", HAIKU)
-    assert len(load("csv-totals", "h-3", HAIKU)) == 1
+    assert load("csv-totals", "h-1", HAIKU) == [("csv-totals", "h-1", HAIKU)]
+    assert load("csv-totals", "h-1", HAIKU) == [("csv-totals", "h-1", HAIKU)]  # once per session
+    assert load("csv-totals", "s-1", MODEL) == [("csv-totals", "h-1", HAIKU)]  # it has a verdict there
+    assert load("hub-skill", "h-2", HAIKU) == [("csv-totals", "h-1", HAIKU)]  # not written by the agent
+    # An agent-written skill no trial has seen (written before Skill Court was installed) is tried the
+    # first time it is used on a model.
+    assert ("written-before-install", "s-2", MODEL) in load("written-before-install", "s-2", MODEL)
+    store.finish_queued("csv-totals", HAIKU, None, "done")
+    # A trial the budget cut short is no verdict: the next Haiku session queues it again.
+    store.finish_trial(store.start_trial("csv-totals", "v1", HAIKU, auto=True), HAIKU, scoring.INCONCLUSIVE,
+                       json.dumps({"stopped": trial.BUDGET}))
+    assert ("csv-totals", "h-3", HAIKU) in load("csv-totals", "h-3", HAIKU)
+    # Dedupe: this version has a verdict on Haiku now (an inconclusive one for want of tasks counts
+    # too), so another Haiku session queues nothing.
+    store.finish_trial(store.start_trial("csv-totals", "v1", HAIKU, auto=True), HAIKU, scoring.INCONCLUSIVE,
+                       json.dumps({"stopped": None}))
+    assert ("csv-totals", "h-4", HAIKU) not in load("csv-totals", "h-4", HAIKU)
     version["csv-totals"] = "v2"  # until the agent changes it
-    assert ("csv-totals", "h-4", HAIKU, "anthropic") in load("csv-totals", "h-4", HAIKU)
+    assert ("csv-totals", "h-5", HAIKU) in load("csv-totals", "h-5", HAIKU)
+
+
+def test_a_trial_the_budget_cut_short_waits_for_tomorrow_and_says_so(runner, monkeypatch):
+    monkeypatch.setattr(cli, "_auto_tasks", lambda *_: [store.Task(1, "csv-totals", "Total it", None, "mined", None)])
+
+    def try_skills(_source, _library, selected, *_args, after, **_kwargs):
+        result = replace(outcome(scoring.INCONCLUSIVE, store.start_trial("csv-totals", "v1", MODEL, auto=True),
+                                 sources={}), stopped=trial.BUDGET)
+        after("csv-totals", result)
+        return [("csv-totals", result)]
+
+    monkeypatch.setattr(cli, "_try_skills", try_skills)
+    queue("s1")
+    assert runner() == 0
+    [row] = rows()
+    assert (row["state"], row["note"]) == ("pending", "waiting for tomorrow's budget")
+    [sent] = store.notices(10)
+    assert "today's budget was reached" in sent["text"] and "runs again tomorrow" in sent["text"]
+    assert "Add tasks" not in sent["text"]
 
 
 def test_the_runner_tries_changes_then_the_most_used_rechecks_within_the_budget(runner, monkeypatch):

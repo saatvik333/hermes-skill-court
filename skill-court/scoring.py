@@ -5,9 +5,9 @@ when the task has one, else the run completing. Repeated runs of one task are no
 evidence, so they are averaged per task first and every interval is a bootstrap over tasks (fixed
 seed, so a report is reproducible). A verdict needs at least ``min_tasks`` tasks with outcomes in
 both arms and its whole 95% interval on one side; with three tasks that means every task moved the
-same way. With ``efficiency`` off (answer-only trials) only success decides a verdict: there a run
-takes one or two calls, so the call that loads the skill alone can double its tokens; the token
-change is still reported.
+same way. With ``efficiency`` off (answer-only trials) only success decides a verdict: a run there is
+a few calls, so the extra call that loads the skill is a large share of its tokens and a token
+verdict would mostly measure that load; the token change is still reported.
 """
 
 from __future__ import annotations

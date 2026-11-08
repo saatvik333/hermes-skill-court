@@ -41,6 +41,8 @@ class Budget:
         self.allow_unpriced = allow_unpriced
         self.spent = 0.0
         self.unpriced = 0
+        # Pairs that never started because the budget stopped new runs.
+        self.skipped = 0
 
     def add(self, result: runner.RunResult) -> None:
         if result.cost_usd is not None:
@@ -72,6 +74,14 @@ class Outcome:
     quote: str | None  # the SKILL.md line the cause names, verified to occur there
     judge_tokens: int
     mode: str = SANDBOX  # how the replays ran: arms.SANDBOX or arms.ANSWER_ONLY
+    # Why an inconclusive trial got too few outcomes when its tasks were not the cause (``BUDGET`` …).
+    stopped: str | None = None
+
+
+# What cut an inconclusive trial short. ``budget``: today's replay budget or judge tokens ran out,
+# so the automatic trial runs again tomorrow; ``no price``: a run reported no price, so the budget
+# could not apply; ``judge``: the judge failed. Such a trial is no verdict on its version.
+BUDGET, NO_PRICE, JUDGE_FAILED = "budget", "no price", "judge"
 
 
 def describe_sources(sources: dict[str, int], mode: str = SANDBOX) -> str:
@@ -145,6 +155,7 @@ def adjudicate(tasks: list[store.Task], replay: Replay, opts: Options, budget: B
                     for arm in ARMS:
                         in_flight[pool.submit(replay, task, arm)] = (task, rep, arm)
                 if not in_flight:
+                    budget.skipped += len(queue)
                     say(f"  {budget.why_stopped()}; {len(queue)} pair(s) not run")
                     break
                 done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
@@ -239,10 +250,12 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
                 decided[(task.id, rep)] = (pair[0], pair[1])
             return pair
 
-        # Answer-only runs are a call or two each, so the call that loads the skill would decide a
-        # token verdict on its own: only success counts there.
+        # An answer-only run is a few calls, so the extra call that loads the skill is a large share of
+        # its tokens and a token verdict would mostly measure that load: only success counts there.
+        skipped = budget.skipped
         score, observed = adjudicate(tasks, replay, opts, budget, record, say, outcome,
                                      efficiency=arms.mode == SANDBOX)
+        cut = budget.skipped > skipped
     model = observed.most_common(1)[0][0] if observed else model
 
     cause = quote = None
@@ -265,7 +278,15 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
             say(f"  skill line: {quote}" if quote else "  skill line: the judge's quote is not in SKILL.md, so none is shown")
 
     failed_with, solved_without = _regressions(decided)
-    summary = {**asdict(score), "sources": dict(sources), "judge_tokens": judge_tokens}
+    stopped = None
+    if score.verdict == scoring.INCONCLUSIVE:
+        if (cut and budget.spent >= budget.limit) or judge.capped:
+            stopped = BUDGET
+        elif cut:
+            stopped = NO_PRICE
+        elif any(j["error"] for j in store.judgments_for(trial_id)):
+            stopped = JUDGE_FAILED
+    summary = {**asdict(score), "sources": dict(sources), "judge_tokens": judge_tokens, "stopped": stopped}
     store.finish_trial(trial_id, model, score.verdict, json.dumps(summary))
     if cause is not None:
         store.set_cause(trial_id, cause, quote, evidence)
@@ -279,4 +300,4 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
         # this version: whatever an earlier trial hid, this version does not hurt. A quarantine set by hand stays.
         released = store.release_court_quarantine(skill.name, model)
     return Outcome(trial_id, model, score, quarantined, released, dict(sources), failed_with, solved_without,
-                   cause, quote, judge_tokens, arms.mode)
+                   cause, quote, judge_tokens, arms.mode, stopped)

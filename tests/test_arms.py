@@ -49,6 +49,11 @@ HERMES_0_23 = {
     "video": ["video_analyze"], "video_gen": ["video_generate", "xai_video_edit", "xai_video_extend"],
     "vision": ["vision_analyze"], "web": ["web_search", "web_extract"], "x_search": ["x_search"],
 }
+# ``tools.registry.get_tool_to_toolset_map()`` of Hermes 0.23: each built-in tool under the one
+# toolset it registers in; the bundles above (``coding``, ``hermes-*`` …) register none.
+_BUNDLES = {"coding", "debugging", "safe", "search"}
+REGISTRY_0_23 = {tool: name for name, tools in HERMES_0_23.items()
+                 if name not in _BUNDLES and not name.startswith("hermes-") for tool in tools}
 
 
 def write_profile(home, name, body):
@@ -93,12 +98,14 @@ def test_skill_under_test_is_hidden_only_in_the_without_arm(monkeypatch):
 
 @pytest.fixture
 def hermes_toolsets(monkeypatch):
-    """Hermes' ``toolsets`` module answering with ``known`` (the 0.23 toolsets unless changed)."""
-    known = dict(HERMES_0_23)
-    fake = types.ModuleType("toolsets")
-    fake.get_toolset_names = lambda: sorted(known)
-    fake.resolve_toolset = lambda name: sorted(known.get(name, ()))
-    monkeypatch.setitem(sys.modules, "toolsets", fake)
+    """Hermes' public ``tools.registry`` answering with ``known`` (tool -> toolset; the 0.23 built-ins
+    unless changed)."""
+    known = dict(REGISTRY_0_23)
+    fake = types.ModuleType("tools.registry")
+    fake.discover_builtin_tools = lambda: []
+    fake.registry = types.SimpleNamespace(get_tool_to_toolset_map=lambda: dict(known))
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.registry", fake)
     return known
 
 
@@ -137,16 +144,23 @@ def test_an_answer_only_replay_keeps_only_the_allowed_toolsets(monkeypatch, herm
 
 
 def test_a_toolset_hermes_adds_later_is_off_in_answer_only_replays(monkeypatch, hermes_toolsets):
-    hermes_toolsets["spreadsheet"] = ["spreadsheet_write"]
+    hermes_toolsets["spreadsheet_write"] = "spreadsheet"
     settings, _ = build(monkeypatch, arms.ANSWER_ONLY)
     assert "spreadsheet" in json.loads(settings["agent.disabled_toolsets"])
 
 
-def test_answer_only_refuses_a_toolset_it_cannot_turn_off_without_an_allowed_one(monkeypatch, hermes_toolsets):
-    # A toolset mixing an allowed tool with one that acts, found in no other toolset, cannot be turned off.
-    hermes_toolsets["search"] = ["web_search", "web_post"]
-    with pytest.raises(CommandError, match="web_post"):
+def test_answer_only_refuses_when_the_registry_lists_none_of_the_allowed_toolsets(monkeypatch, hermes_toolsets):
+    # The registry could not be read (nothing was discovered): nothing is known to turn off.
+    hermes_toolsets.clear()
+    with pytest.raises(CommandError, match="lists none of the skills, todo, web toolsets"):
         build(monkeypatch, arms.ANSWER_ONLY)
+
+
+def test_a_disabled_toolsets_setting_is_read_the_way_hermes_reads_it():
+    assert arms._string_list("[vision, 'tts']") == ["[vision, 'tts']"]  # not a Python list literal
+    assert arms._string_list("['vision', 'tts']") == ["vision", "tts"]
+    assert arms._string_list("vision") == ["vision"]
+    assert arms._string_list(["vision"]) == ["vision"] and arms._string_list(None) == []
 
 
 def test_a_sandbox_replay_runs_its_tools_in_docker(monkeypatch, hermes_toolsets):

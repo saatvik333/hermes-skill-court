@@ -1,9 +1,10 @@
 # Skill Court
 
 A Hermes Agent plugin that tests whether the skills your agent wrote actually help. Install it, then
-use Hermes as usual: after the agent writes or changes a skill, and when you use one on a model its
-current version was never tested on, it replays real tasks with and without the skill in the
-background, scores the difference per model (a sandbox check, or a blind pairwise judge for tasks
+use Hermes as usual: after the agent writes or changes a skill, and the first time you use a skill the
+agent wrote (before or after the install) on a model its current version was never tested on, it
+replays real tasks with and without the skill in the background, scores the difference per model (a
+sandbox check, or a blind pairwise judge for tasks
 without one) and hides harmful skills from the models they hurt without editing their files. It runs
 in Docker sandboxes when Docker answers, otherwise answer-only (the skills, todo and web tools only,
 judged on the final answers), on a $1.00 daily replay budget and 300,000 judge tokens; the first turn

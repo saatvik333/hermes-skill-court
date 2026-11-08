@@ -79,6 +79,19 @@ def test_an_automatic_answer_only_trial_never_hides_a_skill_for_the_tokens_loadi
     assert store.hidden_for(MODEL) == {}
 
 
+def test_a_trial_the_budget_cut_short_is_no_verdict_but_one_with_too_few_tasks_is(skill):
+    arms_ = Arms("default", {"with": "w", "without": "wo"}, SANDBOX)
+    # Two pairs start at once and spend $0.04; the third never starts.
+    cut = trial.run(skill, store.tasks_for(skill.name), arms_, MODEL, trial.Options(), trial.Budget(0.01, False),
+                    lambda _line: None, Judge(None), auto=True)
+    assert (cut.score.verdict, cut.stopped) == (scoring.INCONCLUSIVE, trial.BUDGET)
+    assert not store.has_verdict(skill.name, skill.content_hash(), MODEL)
+    short = trial.run(skill, store.tasks_for(skill.name)[:1], arms_, MODEL, trial.Options(), trial.Budget(5.0, False),
+                      lambda _line: None, Judge(None), auto=True)
+    assert (short.score.verdict, short.stopped) == (scoring.INCONCLUSIVE, None)
+    assert store.has_verdict(skill.name, skill.content_hash(), MODEL)
+
+
 def test_a_changed_skill_that_no_longer_hurts_gets_the_courts_quarantine_lifted(skill):
     store.quarantine(skill.name, MODEL, f"{store.COURT_REASON}4: success fell from 100% to 0%")
     store.quarantine(skill.name, "other-model", f"{store.COURT_REASON}5: success fell")

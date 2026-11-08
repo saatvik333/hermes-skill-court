@@ -3,9 +3,10 @@
 On by default; ``hermes court auto off`` stops it. The first turn of a profile that runs on the
 defaults gets one notice saying so. The ``on_skill_lifecycle`` hook queues each skill the agent
 creates, patches or edits, keyed by the session that changed it, and each agent-written skill a
-session loads on a model that has no verdict on its current version while another model has one (a
-re-check on that model). When that session ends (``on_session_finalize``), or once it has been
-quiet for ``quiet_minutes`` (checked at the start of any later turn), a detached ``hermes -p
+session loads on a model that has no verdict on its current version (a re-check on that model; this
+covers skills written before the plugin was installed). When that session ends
+(``on_session_finalize``), or once it has been quiet for ``quiet_minutes`` (checked at the start of
+any later turn), a detached ``hermes -p
 <profile> court trial --auto`` runs the queue in the background with the same replay profiles as a
 manual trial (sandboxes when Docker answers, else answer-only), appending its output to
 ``plugin-data/skill-court/auto.log``. A runner is started again for work it left unfinished at most
@@ -60,9 +61,10 @@ def on_skill_lifecycle(action: str = "", skill_name: str = "", session_id: str =
 
 def _queue_recheck(skill: str, session_id: str) -> None:
     """``session_id`` just loaded ``skill``: queue a trial on the session's model when the agent wrote
-    the skill, another model has a verdict on it, and this model has none on its current version."""
+    the skill and this model has no verdict on its current version (never tested there, or not since
+    the skill last changed)."""
     route = quarantine.session_route(session_id)
-    if route is None or not store.tested_on_other_models(skill, route[0]):
+    if route is None:
         return
     found = skills.find(skill)
     if found is None or not found.agent_authored or store.has_verdict(skill, found.content_hash(), route[0]):
@@ -72,8 +74,9 @@ def _queue_recheck(skill: str, session_id: str) -> None:
 
 def first_run_notice(settings: store.AutoSettings) -> str:
     """What a profile running automatic trials on their defaults is told, once."""
-    return (f"Skill Court is on: it tests each skill the agent writes or changes, and each one you use on a model "
-            "its current version was never tested on, by replaying its tasks with and without the skill (in "
+    return (f"Skill Court is on: it tests each skill the agent writes or changes, and each skill the agent wrote "
+            "(before or after you installed it) the first time you use its current version on a model, by "
+            "replaying its tasks with and without the skill (in "
             "sandboxes when Docker is available, otherwise with only the skills, todo and web tools). Replays "
             f"stop for the day at ${settings.daily_budget_usd:.2f} of your provider (runs already under way finish), "
             f"and the judge at {settings.daily_judge_tokens:,} tokens. `hermes court auto off` stops it; "
@@ -257,10 +260,16 @@ def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None, rec
     if score.verdict == scoring.NEUTRAL:
         stays = "" if hidden else "; it stays available"
         return f"{head}: `{skill}` made no measurable difference for {model} ({evidence}){stays}.{lifted}{hidden}"
+    if outcome.stopped == trial.BUDGET:
+        return (f"{head}: no verdict for `{skill}` on {model} yet: today's budget was reached before enough of its "
+                f"tasks had an outcome, so it runs again tomorrow.{hidden}")
     text = f"{head}: no verdict for `{skill}` on {model} yet: {score.reason}."
+    retry = f"hermes court trial {skill}" + (f" --model {model}" if recheck else "")
     failed = [j["error"] for j in store.judgments_for(outcome.trial_id) if j["error"]]
-    if failed:
-        retry = f"hermes court trial {skill}" + (f" --model {model}" if recheck else "")
+    if outcome.stopped == trial.NO_PRICE:
+        text += (" A run reported no price, so the daily budget could not apply; run "
+                 f"`{retry} --allow-unpriced` to test it yourself.")
+    elif failed:
         text += f" The judge failed on {len(failed)} task(s): {_sentence(failed[0])} Run `{retry}` once it works again."
     else:
         text += f" Add tasks with `hermes court tasks add {skill} --prompt …`."

@@ -405,20 +405,15 @@ def latest_trials(skills: Iterable[str] | None = None) -> list[dict]:
     return [dict(r) for r in rows if wanted is None or r["skill"] in wanted]
 
 
-def tested_on_other_models(skill: str, model: str) -> bool:
-    """Whether a finished trial judged any version of ``skill`` on a model other than ``model``."""
-    with closing(_connect()) as conn:
-        return bool(conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM trials WHERE skill = ? AND model != ? AND finished_at IS NOT NULL)",
-            (skill, model)).fetchone()[0])
-
-
 def has_verdict(skill: str, skill_hash: str, model: str) -> bool:
-    """Whether a finished trial judged this version of ``skill`` (its content hash) on ``model``."""
+    """Whether a finished trial judged this version of ``skill`` (its content hash) on ``model``. An
+    inconclusive trial that the budget, the judge's token cap or a failing judge cut short is not one."""
     with closing(_connect()) as conn:
         return bool(conn.execute(
             "SELECT EXISTS (SELECT 1 FROM trials WHERE skill = ? AND skill_hash = ? AND model = ?"
-            " AND finished_at IS NOT NULL)", (skill, skill_hash, model)).fetchone()[0])
+            " AND finished_at IS NOT NULL"
+            " AND (verdict != 'inconclusive' OR json_extract(summary, '$.stopped') IS NULL))",
+            (skill, skill_hash, model)).fetchone()[0])
 
 
 # --- appeals ----------------------------------------------------------------------------------

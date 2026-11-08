@@ -10,8 +10,8 @@ the same tasks, and writes it only when you apply it.
 ## Install, then use Hermes as usual
 
 1. Every skill the agent writes or changes is tried in the background once its session ends.
-2. A skill the agent wrote that you use on a model its current version was never tested on is tried
-   on that model.
+2. A skill the agent wrote, before or after you installed Skill Court, is tried on a model the first
+   time you use its current version there.
 3. Replays run in Docker sandboxes when Docker answers, otherwise answer-only (the skills, todo and
    web tools only, judged on the final answers, success alone deciding).
 4. Replays stop for the day at $1.00 of your provider (runs already under way finish), the judge at
@@ -93,7 +93,8 @@ hermes court trial --all
    tasks with outcomes in both arms. A verdict needs its whole 95% bootstrap interval on one side,
    which with three tasks means every task moved the same way. Each verdict is tied to the skill's
    content hash and the model. In answer-only trials only success decides (the token change is still
-   shown): there a run is one or two calls, so the call that loads the skill can double its tokens.
+   shown): a run there is a few calls, so the extra call that loads the skill is a large share of its
+   tokens, and a token verdict would mostly measure that load.
 6. **Says why it hurt.** For a `hurts` verdict, before the replay profiles are deleted, Skill Court
    takes a task the skill made fail, reads that run's transcript from the skill load to the final
    answer, and asks the judge for the cause and the one line of `SKILL.md` behind it (at most 16,000
@@ -168,10 +169,13 @@ off. Then:
 
 1. When the agent creates, patches or edits a skill (the `on_skill_lifecycle` hook), the skill is
    queued with the session that changed it. When a session loads (`skill_view`) a skill the agent
-   wrote, on a model that has no verdict on the skill's current content hash while another model
-   has a verdict on it, the skill is queued for a trial on that model (a **re-check**), with the
-   session's provider. A re-check is queued once per session and model. No trial runs for a version
-   that already has a verdict on its model, whether it was queued as a change or a re-check.
+   wrote, on a model that has no verdict on the skill's current content hash (it was never tried
+   there, including skills written before Skill Court was installed, or not since it last changed),
+   the skill is queued for a trial on that model (a **re-check**), with the session's provider. A
+   re-check is queued once per session and model. No trial runs for a version that already has a
+   verdict on its model, whether it was queued as a change or a re-check. An `inconclusive` trial
+   that today's budget, the judge's token cap or a failing judge cut short is not a verdict; one cut
+   short by the budget or the token cap waits for the next day's and runs again, and its notice says so.
 2. When that session ends (`on_session_finalize`), or once it has gone 15 minutes without another
    change while the session stays open (`--quiet-minutes`, checked at the start of each turn), a
    background `hermes -p <profile> court trial --auto` starts. It waits for any trial already
@@ -241,8 +245,9 @@ trials still run, without sandboxes: the replay profiles keep only the tools of 
 and `web` toolsets (see [Disclosure](#disclosure)); `skill_manage` writes stay staged inside the
 replay profile, so a replay cannot touch your files. No check can run, so every pair goes to the
 [judge](#the-judge), which compares the two final answers in both orders, and only success decides
-the verdict: an answer-only run is one or two calls, so the call that loads the skill would decide a
-token verdict on its own. The trial records its mode, and the report, notices, Desktop page and
+the verdict: a run is a few calls, so the extra call that loads the skill is a large share of its
+tokens, and a token verdict would mostly measure that load. The trial records its mode, and the
+report, notices, Desktop page and
 dashboard API label its verdict `answer-only`.
 
 It measures what a skill makes the agent say or decide: a wrong rule, a convention the answer
@@ -488,12 +493,12 @@ hermes -p courtlab court report
   speech generation. Environment variables that a loaded skill declares it needs are still passed
   into the sandbox, as in normal Hermes use, and web search uses your own search keys. **Answer-only
   mode** (no container runtime answers, or `--answer-only`): no Docker, and only the tools of the
-  `skills`, `todo` and `web` toolsets stay. Every other toolset Hermes lists
-  (`toolsets.get_toolset_names()` when the profile is built, so ones added in later Hermes versions
-  too) whose tools all lie outside those three goes into `agent.disabled_toolsets`, which Hermes
-  subtracts last; a toolset that mixes them with others (`coding`, `hermes-cli`) is not listed, and
-  its other tools are removed with the basic toolsets that hold them. The build is refused if a tool
-  outside those three toolsets would remain. Web search and extraction use your own search keys.
+  `skills`, `todo` and `web` toolsets stay. Every other toolset that Hermes' public tool registry
+  files a built-in tool under (`tools.registry`, read when the profile is built, so ones added in
+  later Hermes versions too) goes into `agent.disabled_toolsets`, which Hermes subtracts last, tool
+  by tool, so a bundle such as `coding` or `hermes-cli` keeps only the allowed tools. The build is
+  refused if the registry lists none of those three toolsets. Web search and extraction use your
+  own search keys.
 - **Reads:** session history through Hermes' read-only `SessionDB` (including the transcripts of its
   own replays, the platform, sender and chat Hermes recorded for each session that changed or used a
   skill, and for the session of a turn a verdict may be meant for, to decide who is told it; and,
@@ -502,7 +507,7 @@ hermes -p courtlab court report
   through Hermes' public skill helpers and the skills directory's `.usage.json`, and
   `skills.disabled` / `model.default` / `agent.disabled_toolsets` through `hermes config get`. An
   appeal's draft is read with Hermes' `agent.skill_utils.parse_frontmatter` and scanned with
-  `tools.skills_guard`. The list of toolsets comes from Hermes' `toolsets` module.
+  `tools.skills_guard`. The toolsets of Hermes' built-in tools come from its public `tools.registry`.
 - **Hooks:** with automatic trials on (the default), `on_skill_lifecycle` records the name of each
   skill the agent creates, patches or edits, and the session it happened in, and, when a session
   loads an agent-written skill, that session's model and provider if a re-check is due (the model
