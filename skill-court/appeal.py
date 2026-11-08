@@ -179,7 +179,8 @@ def draft_and_try(source: str, skill: Skill, model: str, opts: trial.Options, bu
                   judge: Judge, say: Callable[[str], None], *, task_limit: int | None = None,
                   auto: bool = False) -> dict:
     """Draft a fix for ``skill``'s latest ``hurts`` verdict on ``model`` and put it on the same tasks
-    (the first ``task_limit`` of them, when given); returns the decided appeal row."""
+    (the first ``task_limit`` of them, when given), run the way that verdict's trial ran (in sandboxes
+    or answer-only); returns the decided appeal row."""
     appealed = _appealed(skill.name, model)
     task_ids = {run["task_id"] for run in store.runs_for(appealed["id"])}
     tasks = [task for task in store.tasks_for(skill.name) if task.id in task_ids][:task_limit]
@@ -190,6 +191,11 @@ def draft_and_try(source: str, skill: Skill, model: str, opts: trial.Options, bu
     except ValueError:
         raise CommandError(f"{skill.name} lives outside the profile's skills directory ({skill.path}), so its "
                            "replay copy cannot be swapped for a draft") from None
+    # The draft must beat the original on the same footing.
+    mode = appealed["mode"]
+    if mode == arms.SANDBOX and (why := arms.sandbox_unavailable()) is not None:
+        raise CommandError(f"trial #{appealed['id']} ran in Docker sandboxes, so its draft has to as well, and no "
+                           f"container runtime answers ({why}); nothing was drafted")
 
     # Hashed before the bytes are read: a change in between leaves them disagreeing, and apply refuses.
     base_hash = skill.content_hash()
@@ -214,7 +220,7 @@ def draft_and_try(source: str, skill: Skill, model: str, opts: trial.Options, bu
         appeal_id = store.add_appeal(skill.name, model, appealed["id"], base_hash, original_bytes,
                                      drafted, drafted_skill.content_hash(), changes)
         hidden = [*arms.source_disabled_skills(source), *store.hidden_for(model)]
-        replay_arms = arms.for_source(source)
+        replay_arms = arms.for_source(source, mode)
         say(f"\nTrying the draft: {len(tasks)} task(s) x {opts.reps} rep(s), with the draft and without the skill, on {model}")
         try:
             arms.prepare(replay_arms)

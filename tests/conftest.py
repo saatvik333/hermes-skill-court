@@ -4,6 +4,7 @@ Hermes modules it imports, rooted in a per-test temporary Hermes home.
 ``register(ctx)`` is never run, so tests exercise the modules directly without a Hermes install.
 """
 
+import ast
 import re
 import sqlite3
 import sys
@@ -62,8 +63,23 @@ def _parse_frontmatter(content: str):
     return frontmatter, body
 
 
+def _parse_config_string_list(value) -> list[str]:
+    """``agent.skill_utils.parse_config_string_list`` of Hermes 0.23, copied as is."""
+    if isinstance(value, str):
+        if value.strip().startswith("["):
+            try:
+                parsed = ast.literal_eval(value.strip())
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return [value]
+    return [str(item) for item in value] if isinstance(value, (list, tuple, set, frozenset)) else []
+
+
 _skill_utils = types.ModuleType("agent.skill_utils")
 _skill_utils.parse_frontmatter = _parse_frontmatter
+_skill_utils.parse_config_string_list = _parse_config_string_list
 sys.modules.setdefault("agent", types.ModuleType("agent"))
 sys.modules.setdefault("agent.skill_utils", _skill_utils)
 

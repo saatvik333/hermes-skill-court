@@ -6,7 +6,8 @@ Replays run as single-query sessions (``hermes chat -Q --oneshot``): approval pr
 SIGTERM, which interrupts the turn, and SIGKILL if it does not stop.
 
 A task without a check keeps the run's final answer and a bounded snapshot of the files it left
-in its sandbox, taken before the sandbox is removed, for the judge to compare.
+in its sandbox, taken before the sandbox is removed, for the judge to compare. An answer-only
+replay has no sandbox: its final answer is all there is.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ SNAPSHOT_ROOTS = ("/workspace", "/root")
 SNAPSHOT_FILES = 40
 SNAPSHOT_FILE_KB = 64
 SNAPSHOT_CHARS = 16_000
+# What the judge is shown as an answer-only run's files.
+NO_SANDBOX = "(none: this attempt ran without a sandbox or file tools)"
 
 
 @dataclass
@@ -193,10 +196,25 @@ def _tail(text: str, lines: int = 2, chars: int = 240) -> str:
     return " ".join(kept)[:chars]
 
 
+def _settle(result: RunResult, responded: bool, timed_out: bool, output: str) -> bool:
+    """Set whether the run completed; False when it has no outcome, with the reason in ``error``."""
+    if timed_out:
+        return False  # result.error already says it timed out
+    if not responded:
+        result.error = f"no model response: {_tail(output) or 'empty output'}"
+        return False
+    # 0: the turn completed. 1: it ran but stopped early (iteration or time budget, partial).
+    result.completed = result.exit_code == 0 if result.exit_code in (0, 1) else None
+    if result.completed is None:
+        result.error = f"exit code {result.exit_code}: {_tail(output)}"
+    return result.completed is not None
+
+
 def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, timeout: float,
-           model: str | None = None, provider: str | None = None) -> RunResult:
+           model: str | None = None, provider: str | None = None, sandbox: bool = True) -> RunResult:
     """Run ``prompt`` once in ``profile``. ``passed`` and ``completed`` stay None when the run has no
-    outcome (the model never answered, or the client gave up); such runs are left out of the verdict."""
+    outcome (the model never answered, or the client gave up); such runs are left out of the verdict.
+    ``sandbox``: the profile runs its tools in Docker; without it nothing is checked or read there."""
     result = RunResult()
     query = workdir / f"query-{uuid.uuid4().hex}.txt"
     query.write_text(prompt, encoding="utf-8")
@@ -235,41 +253,38 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     responded = read_session(profile, result.session_id, result)
     # The gateway may not have flushed token counters yet; a completed turn with an answer did respond.
     responded = responded or (result.exit_code == 0 and bool(stdout.strip()))
+    if not sandbox:
+        if _settle(result, responded, timed_out, output):
+            result.workspace = NO_SANDBOX
+        return result
     container = None
     try:
         matches = session_containers(profile, result.session_id, _labelled_containers(profile))
         container = matches[0] if len(matches) == 1 else None
-        if timed_out:
-            pass  # no outcome; result.error already says it timed out
-        elif not responded:
-            result.error = f"no model response: {_tail(output) or 'empty output'}"
-        else:
-            # 0: the turn completed. 1: it ran but stopped early (iteration or time budget, partial).
-            result.completed = result.exit_code == 0 if result.exit_code in (0, 1) else None
-            if result.completed is None:
-                result.error = f"exit code {result.exit_code}: {_tail(output)}"
-            elif check_cmd is not None:
-                if container is not None:
-                    check = run([container_binary(), "exec", container, "sh", "-lc", check_cmd],
-                                timeout=CHECK_TIMEOUT, check=False)
-                    result.passed = check.returncode == 0
-                elif matches:
-                    result.error = f"{len(matches)} sandboxes carry this session's label; not checking any"
-                else:
-                    # The agent never opened a sandbox, so it produced nothing the check could find.
-                    result.passed = False
-                    result.error = "no sandbox was created, so the check found nothing to verify"
-            elif container is not None:
-                try:
-                    result.workspace = _snapshot(container, math.ceil((time.monotonic() - started) / 60) + 1)
-                except CommandError as exc:
-                    # The judge would weigh this run's missing files against the other run's files.
-                    result.completed = None
-                    result.error = f"its sandbox's files could not be read, so it has no outcome: {exc}"
+        if not _settle(result, responded, timed_out, output):
+            pass
+        elif check_cmd is not None:
+            if container is not None:
+                check = run([container_binary(), "exec", container, "sh", "-lc", check_cmd],
+                            timeout=CHECK_TIMEOUT, check=False)
+                result.passed = check.returncode == 0
             elif matches:
-                result.workspace = f"({len(matches)} sandboxes carry this session's label; none was read)"
+                result.error = f"{len(matches)} sandboxes carry this session's label; not checking any"
             else:
-                result.workspace = "(the run opened no sandbox, so it left no files)"
+                # The agent never opened a sandbox, so it produced nothing the check could find.
+                result.passed = False
+                result.error = "no sandbox was created, so the check found nothing to verify"
+        elif container is not None:
+            try:
+                result.workspace = _snapshot(container, math.ceil((time.monotonic() - started) / 60) + 1)
+            except CommandError as exc:
+                # The judge would weigh this run's missing files against the other run's files.
+                result.completed = None
+                result.error = f"its sandbox's files could not be read, so it has no outcome: {exc}"
+        elif matches:
+            result.workspace = f"({len(matches)} sandboxes carry this session's label; none was read)"
+        else:
+            result.workspace = "(the run opened no sandbox, so it left no files)"
     except CommandError as exc:
         result.error = str(exc)
     finally:

@@ -1,9 +1,9 @@
-"""Desktop backend: verdicts, quarantine and appeals, under /api/plugins/skill-court/."""
+"""Desktop backend: verdicts, usage evidence, quarantine and appeals, under /api/plugins/skill-court/."""
 
 from __future__ import annotations
 
 import asyncio
-import importlib.util
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -13,34 +13,19 @@ from fastapi import APIRouter, HTTPException
 from hermes_constants import get_hermes_home, profile_name_for_home
 from pydantic import BaseModel
 
+# Hermes imports this file on its own, outside the plugin package. The plugin's folder is mounted as
+# this package, without running its ``__init__`` (which registers hooks), so its modules import each
+# other as they do in the plugin.
+_PACKAGE = "skill_court_dashboard"
+if _PACKAGE not in sys.modules:
+    _package = ModuleType(_PACKAGE)
+    _package.__path__ = [str(Path(__file__).resolve().parents[1])]
+    sys.modules[_PACKAGE] = _package
 
-def _sibling(name: str) -> ModuleType:
-    """Load one of the plugin's own modules from the folder above. Hermes imports this file on its
-    own, outside the plugin package; ``store``, ``skills`` and ``procs`` have no relative imports.
-
-    The module is registered under its own ``skill_court_dashboard_*`` name before it runs, as the
-    standard importlib recipe does: its dataclasses look their module up in ``sys.modules``.
-    """
-    module_name = f"skill_court_dashboard_{name}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    path = Path(__file__).resolve().parents[1] / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        del sys.modules[module_name]
-        raise
-    return module
-
-
-store = _sibling("store")
-skills = _sibling("skills")
-procs = _sibling("procs")
+store = importlib.import_module(f"{_PACKAGE}.store")
+skills = importlib.import_module(f"{_PACKAGE}.skills")
+procs = importlib.import_module(f"{_PACKAGE}.procs")
+usage = importlib.import_module(f"{_PACKAGE}.usage")
 
 router = APIRouter()
 
@@ -87,6 +72,7 @@ def _verdicts() -> dict:
             "skill": trial["skill"],
             "model": trial["model"],
             "verdict": trial["verdict"],
+            "mode": trial["mode"],  # sandbox or answer-only
             "judged_at": trial["finished_at"],
             "trial_id": trial["id"],
             "auto": bool(trial["auto"]),
@@ -103,6 +89,12 @@ def _verdicts() -> dict:
     return {"verdicts": rows, "quarantine": quarantine, "auto": auto, "appeals": _appeals(library)}
 
 
+def _usage() -> dict:
+    """``usage.describe`` per skill with a verdict that session history shows loaded."""
+    found = usage.scan(frozenset(t["skill"] for t in store.latest_trials()))
+    return {"label": usage.LABEL, "skills": {skill: usage.describe(by_model) for skill, by_model in found.items()}}
+
+
 def _quarantine(body: QuarantineBody) -> dict:
     if body.skill not in skills.library():
         raise HTTPException(status_code=404, detail=f"no skill named {body.skill}")
@@ -115,6 +107,13 @@ def _quarantine(body: QuarantineBody) -> dict:
 @router.get("/verdicts")
 async def verdicts() -> dict:
     return await asyncio.to_thread(_verdicts)
+
+
+# Separate from /verdicts, which the page polls: this reads the whole session history, so the page
+# asks for it when it opens and on Refresh.
+@router.get("/usage")
+async def usage_evidence() -> dict:
+    return await asyncio.to_thread(_usage)
 
 
 @router.post("/quarantine")

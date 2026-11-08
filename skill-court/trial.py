@@ -1,7 +1,8 @@
 """A trial: replay a skill's tasks with and without the skill, then score the pairs.
 
 A task with a check is scored by its check; a task without one by the blind pairwise judge
-(``judge.py``), which compares the two runs' answers and files as soon as both have finished.
+(``judge.py``), which compares the two runs' answers and files as soon as both have finished. An
+answer-only trial has no sandbox for a check to run in, so the judge scores every pair.
 """
 
 from __future__ import annotations
@@ -9,13 +10,13 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict, deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable
 
 from plugins.plugin_storage import plugin_data_dir
 
 from . import runner, scoring, store
-from .arms import ARMS, Arms
+from .arms import ANSWER_ONLY, ARMS, SANDBOX, Arms
 from .judge import Attempt, Judge, Judgment, excerpt, successes
 from .skills import Skill
 
@@ -70,12 +71,15 @@ class Outcome:
     cause: str | None
     quote: str | None  # the SKILL.md line the cause names, verified to occur there
     judge_tokens: int
+    mode: str = SANDBOX  # how the replays ran: arms.SANDBOX or arms.ANSWER_ONLY
 
 
-def describe_sources(sources: dict[str, int]) -> str:
-    """Where a trial's pair outcomes came from, e.g. ``2 checked, 1 judged``."""
+def describe_sources(sources: dict[str, int], mode: str = SANDBOX) -> str:
+    """Where a trial's pair outcomes came from, e.g. ``2 checked, 1 judged``, or ``3 judged,
+    answer-only`` for a trial without sandboxes."""
     parts = [f"{sources[key]} {label}" for key, label in (("check", "checked"), ("judge", "judged")) if sources.get(key)]
-    return ", ".join(parts) or "no outcomes"
+    text = ", ".join(parts) or "no outcomes"
+    return f"{text}, answer-only" if mode == ANSWER_ONLY else text
 
 
 def _success(result: runner.RunResult, has_check: bool) -> bool | None:
@@ -181,8 +185,12 @@ def _regressions(decided: dict[tuple[int, int], tuple[bool, bool]]) -> tuple[int
 
 def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Options, budget: Budget,
         say: Callable[[str], None], judge: Judge, auto: bool = False, appeal_id: int | None = None) -> Outcome:
-    """``appeal_id``: this trial tries that appeal's draft (``skill.path`` holds the drafted skill)."""
-    trial_id = store.start_trial(skill.name, skill.content_hash(), model, auto, appeal_id)
+    """``appeal_id``: this trial tries that appeal's draft (``skill.path`` holds the drafted skill).
+    ``arms.mode`` decides how the replays run."""
+    if arms.mode == ANSWER_ONLY:
+        # No sandbox for a check to run in: every pair goes to the judge, on its final answers.
+        tasks = [replace(task, check_cmd=None) for task in tasks]
+    trial_id = store.start_trial(skill.name, skill.content_hash(), model, auto, appeal_id, arms.mode)
     workdir = plugin_data_dir(store.PLUGIN) / "runs"
     workdir.mkdir(parents=True, exist_ok=True)
     by_id = {task.id: task for task in tasks}
@@ -193,8 +201,8 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
     judge_tokens = 0
 
     def replay(task: store.Task, arm: str) -> runner.RunResult:
-        return runner.replay(arms.profiles[arm], task.prompt, task.check_cmd, workdir=workdir,
-                             timeout=opts.timeout, model=opts.model, provider=opts.provider)
+        return runner.replay(arms.profiles[arm], task.prompt, task.check_cmd, workdir=workdir, timeout=opts.timeout,
+                             model=opts.model, provider=opts.provider, sandbox=arms.mode == SANDBOX)
 
     with ThreadPoolExecutor(max_workers=opts.parallel) as judges:
         def record(task: store.Task, rep: int, arm: str, result: runner.RunResult) -> None:
@@ -261,8 +269,8 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
         store.quarantine(skill.name, model, f"{store.COURT_REASON}{trial_id}: {score.reason}")
         quarantined = True
     elif opts.apply and auto and score.verdict in (scoring.HELPS, scoring.NEUTRAL):
-        # An automatic trial runs because the skill changed: the version an earlier trial hid is gone,
-        # and this one does not hurt. A quarantine set by hand stays.
+        # An automatic trial tries the skill as it is now, after a change or on a model that never judged
+        # this version: whatever an earlier trial hid, this version does not hurt. A quarantine set by hand stays.
         released = store.release_court_quarantine(skill.name, model)
     return Outcome(trial_id, model, score, quarantined, released, dict(sources), failed_with, solved_without,
-                   cause, quote, judge_tokens)
+                   cause, quote, judge_tokens, arms.mode)

@@ -1,9 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 
 from skill_court import scoring, store, trial
-from skill_court.arms import Arms
+from skill_court.arms import ANSWER_ONLY, SANDBOX, Arms
 from skill_court.judge import Judge
-from skill_court.runner import RunResult
+from skill_court.runner import NO_SANDBOX, RunResult
 from skill_court.skills import Skill
 
 MODEL = "claude-sonnet-5-5"
@@ -28,8 +30,40 @@ def skill(hermes_home, monkeypatch):
 
 
 def run(skill, *, auto, apply=True):
-    return trial.run(skill, store.tasks_for(skill.name), Arms("default", {"with": "w", "without": "wo"}), MODEL,
+    return trial.run(skill, store.tasks_for(skill.name), Arms("default", {"with": "w", "without": "wo"}, SANDBOX), MODEL,
                      trial.Options(apply=apply), trial.Budget(5.0, False), lambda _line: None, Judge(None), auto=auto)
+
+
+class Ties:
+    """``ctx.llm`` answering every comparison with a tie."""
+
+    def __init__(self):
+        self.prompts = []
+
+    def complete_structured(self, *, input, **_):
+        self.prompts.append(input[0]["text"])
+        return SimpleNamespace(parsed={"better": "tie", "reason": "same total"}, model="judge-model", text="",
+                               usage=SimpleNamespace(total_tokens=10))
+
+
+def test_an_answer_only_trial_judges_every_pair_and_records_its_mode(skill, monkeypatch):
+    replays = []
+
+    def replay(profile, prompt, check_cmd, **kwargs):
+        replays.append((check_cmd, kwargs["sandbox"]))
+        return RunResult(model=MODEL, completed=True, answer="465", workspace=NO_SANDBOX, tokens=1_000, cost_usd=0.01)
+
+    monkeypatch.setattr(trial.runner, "replay", replay)
+    llm = Ties()
+    outcome = trial.run(skill, store.tasks_for(skill.name), Arms("default", {"with": "w", "without": "wo"}, ANSWER_ONLY),
+                        MODEL, trial.Options(), trial.Budget(5.0, False), lambda _line: None, Judge(llm))
+    # The tasks have checks, but no sandbox to run them in: every pair went to the judge, in both orders.
+    assert replays == [(None, False)] * 6
+    assert len(store.judgments_for(outcome.trial_id)) == 3 and len(llm.prompts) == 6
+    assert all(NO_SANDBOX in prompt for prompt in llm.prompts)
+    assert (outcome.sources, outcome.mode, outcome.score.verdict) == ({"judge": 3}, ANSWER_ONLY, scoring.NEUTRAL)
+    assert store.latest_trials()[0]["mode"] == ANSWER_ONLY
+    assert trial.describe_sources(outcome.sources, outcome.mode) == "3 judged, answer-only"
 
 
 def test_a_changed_skill_that_no_longer_hurts_gets_the_courts_quarantine_lifted(skill):

@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from skill_court import auto, cli, scoring, store, trial
+from skill_court import auto, cli, quarantine, scoring, store, trial, usage
+from skill_court.arms import ANSWER_ONLY
 from skill_court.procs import CommandError
 
 ON = store.AutoSettings(enabled=True, daily_budget_usd=1.0, quiet_minutes=15, daily_judge_tokens=1_000)
 MODEL = "claude-sonnet-5-5"
+HAIKU = "claude-haiku-5-5"
 OWNER = store.Origin("cli-1", store.LOCAL, None)
 
 
@@ -27,14 +29,22 @@ def rows():
     return store.auto_queue_rows(100)
 
 
-def test_changes_are_recorded_only_when_auto_mode_is_on():
-    auto.on_skill_lifecycle(action="created", skill_name="csv-totals", session_id="s1")
-    assert rows() == []
-    store.set_auto_settings(ON)
-    auto.on_skill_lifecycle(action="loaded", skill_name="csv-totals", session_id="s1")
+def court(*argv):
+    parser = argparse.ArgumentParser()
+    cli.setup(parser)
+    return cli.dispatch(parser.parse_args(list(argv)), None)
+
+
+def test_automatic_trials_are_on_by_default_and_an_explicit_off_stays_off():
+    assert store.auto_settings() == store.AutoSettings(True, 1.0, 15.0, 300_000)
     auto.on_skill_lifecycle(action="installed", skill_name="hub-skill", session_id="s1")
-    auto.on_skill_lifecycle(action="patched", skill_name="csv-totals", session_id="s1")
+    auto.on_skill_lifecycle(action="created", skill_name="csv-totals", session_id="s1")
     assert [(r["skill"], r["session_id"], r["state"]) for r in rows()] == [("csv-totals", "s1", "pending")]
+    assert court("auto", "off") == 0
+    assert store.auto_settings() == store.AutoSettings(False, 1.0, 15.0, 300_000)
+    auto.on_skill_lifecycle(action="patched", skill_name="json-format", session_id="s2")
+    assert [r["skill"] for r in rows()] == ["csv-totals"]
+    assert turn() == []  # nor is the user told it is on
 
 
 def test_a_change_waits_for_its_session_to_end(started):
@@ -74,12 +84,12 @@ def test_a_change_put_back_after_a_failed_attempt_waits_unless_the_agent_changes
     now = datetime.now(timezone.utc)
     auto.launch_ready(ON, now)
     store.start_queued()
-    store.defer_queued("csv-totals", "waiting: Docker is not running")  # what the runner does then
+    store.defer_queued("csv-totals", "", "waiting: the runner was killed")  # what the runner does then
     assert auto.launch_ready(ON, now + timedelta(minutes=1)) == []
     assert auto.launch_ready(ON, now + timedelta(minutes=auto.RETRY_MINUTES)) == ["csv-totals"]
     assert started == ["default", "default"]
     store.start_queued()
-    store.defer_queued("csv-totals", "waiting: Docker is not running")
+    store.defer_queued("csv-totals", "", "waiting: the runner was killed")
     store.queue_change("csv-totals", "s1")  # a new change is tried as soon as it is ready
     store.end_session("s1")
     assert auto.launch_ready(ON, now + timedelta(minutes=auto.RETRY_MINUTES + 1)) == ["csv-totals"]
@@ -89,9 +99,9 @@ def test_a_further_change_during_a_trial_waits_for_its_own_trial():
     store.queue_change("csv-totals", "s1")
     store.end_session("s1")
     auto.launch_ready(ON)
-    assert store.start_queued() == {"csv-totals": ["s1"]}
+    assert store.start_queued() == [store.Queued("csv-totals", "", None, ["s1"])]
     store.queue_change("csv-totals", "s1")  # the agent patched it again mid-trial
-    store.finish_queued("csv-totals", None, "neutral")
+    store.finish_queued("csv-totals", "", None, "neutral")
     assert [r["state"] for r in rows()] == ["pending"]
 
 
@@ -100,9 +110,9 @@ def test_a_killed_runner_leaves_its_rows_for_the_next_one():
     store.end_session("s1")
     auto.launch_ready(ON)
     store.start_queued()
-    assert store.start_queued() == {}
+    assert store.start_queued() == []
     assert store.requeue_orphans() == 1
-    assert store.start_queued() == {"csv-totals": ["s1"]}
+    assert store.start_queued() == [store.Queued("csv-totals", "", None, ["s1"])]
 
 
 def auto_trial(started_at: datetime, cost: float, automatic: bool = True) -> None:
@@ -170,21 +180,27 @@ def turn(ctx=None, session_id="cli-2", platform="cli", sender=""):
     return ctx.posted
 
 
-def test_a_verdict_is_posted_once_at_the_next_turn():
+@pytest.fixture
+def chosen():
+    """The user set automatic trials up, so no first-run notice joins the verdicts."""
+    store.set_auto_settings(ON)
+
+
+def test_a_verdict_is_posted_once_at_the_next_turn(chosen):
     store.add_notice(None, "first", OWNER)
     store.add_notice(None, "second", OWNER)
     assert turn() == ["first", "second"]  # nothing goes to the model
     assert turn() == []
 
 
-def test_a_notice_that_could_not_be_posted_waits_for_the_next_turn():
+def test_a_notice_that_could_not_be_posted_waits_for_the_next_turn(chosen):
     store.add_notice(None, "first", OWNER)
     store.add_notice(None, "second", OWNER)
     assert turn(Ctx({"ok": False, "error": "no_conversation"})) == ["first"]
     assert turn() == ["first", "second"]
 
 
-def test_a_post_that_timed_out_still_lands_and_one_nobody_saw_waits():
+def test_a_post_that_timed_out_still_lands_and_one_nobody_saw_waits(chosen):
     store.add_notice(None, "first", OWNER)
     store.add_notice(None, "second", OWNER)
     # The gateway did not answer in time: the post still lands, so it is not posted twice.
@@ -195,7 +211,7 @@ def test_a_post_that_timed_out_still_lands_and_one_nobody_saw_waits():
     assert turn() == []
 
 
-def test_a_notice_reaches_only_its_session_or_the_same_sender_in_the_same_chat(monkeypatch):
+def test_a_notice_reaches_only_its_session_or_the_same_sender_in_the_same_chat(chosen, monkeypatch):
     chats = {"tg-2": "dm-bob", "tg-3": "group-7", "tg-4": "dm-alice", "dc-1": "dm-alice"}
     monkeypatch.setattr(auto.mining, "session_origin", lambda session: ("telegram", None, chats.get(session)))
     store.add_notice(None, "for alice", store.Origin("tg-1", "telegram", "alice", "dm-alice"))
@@ -294,8 +310,7 @@ def test_a_trial_the_judge_could_not_decide_names_the_judge_error():
 @pytest.fixture
 def runner(monkeypatch):
     """``hermes court trial --auto`` with Docker, the skill library and history stubbed."""
-    monkeypatch.setattr(cli, "container_binary", lambda: "docker")
-    monkeypatch.setattr(cli, "run", lambda argv, **_: None)
+    monkeypatch.setattr(cli.arms, "sandbox_unavailable", lambda: None)
     monkeypatch.setattr(cli.skills, "library", lambda: {"csv-totals": SimpleNamespace(name="csv-totals")})
     monkeypatch.setattr(cli.arms, "source_disabled_skills", lambda _source: [])
     parser = argparse.ArgumentParser()
@@ -330,17 +345,97 @@ def test_the_runner_addresses_each_verdict_to_whoever_changed_the_skill(runner, 
     assert {r["state"] for r in rows()} == {"done"}
 
 
-def test_a_runner_that_cannot_reach_docker_puts_the_changes_back(runner, monkeypatch, started):
-    def no_docker(argv, **_):
-        raise CommandError("`docker version …` exited 1: Cannot connect to the Docker daemon")
+def test_a_runner_without_docker_tries_the_changes_answer_only(runner, monkeypatch):
+    monkeypatch.setattr(cli.arms, "sandbox_unavailable", lambda: "`docker version …` exited 1: Cannot connect")
+    monkeypatch.setattr(cli, "_auto_tasks", lambda *_: [store.Task(1, "csv-totals", "Total it", "check", "mined", None)])
+    modes = []
 
-    monkeypatch.setattr(cli, "run", no_docker)
+    def try_skills(_source, _library, selected, *_args, mode, after, **_kwargs):
+        modes.append(mode)
+        done = [(name, outcome(scoring.NEUTRAL, store.start_trial(name, "h", MODEL, True, None, mode))) for name in selected]
+        for name, result in done:
+            after(name, result)
+        return done
+
+    monkeypatch.setattr(cli, "_try_skills", try_skills)
     queue("s1")
-    assert runner() == 1
-    [row] = rows()
-    assert row["state"] == "pending" and "Cannot connect to the Docker daemon" in row["note"]
-    assert store.notices(10) == []
-    assert auto.launch_ready(ON) == [] and started == ["default"]  # not again before the retry interval
+    assert runner() == 0
+    assert modes == [ANSWER_ONLY] and [r["state"] for r in rows()] == ["done"]
+
+
+def finished(skill, skill_hash, model):
+    store.finish_trial(store.start_trial(skill, skill_hash, model, auto=True), model, scoring.NEUTRAL, "{}")
+
+
+def test_a_skill_used_on_a_model_with_no_verdict_on_its_version_is_queued_for_that_model(monkeypatch):
+    version = {"csv-totals": "v1", "json-format": "v1", "hub-skill": "v1"}
+    monkeypatch.setattr(auto.skills, "find", lambda name: SimpleNamespace(
+        name=name, agent_authored=name != "hub-skill", content_hash=lambda: version[name]))
+
+    def load(skill, session, model):
+        quarantine.on_llm_request(session_id=session, model=model, provider="anthropic")
+        auto.on_skill_lifecycle(action="loaded", skill_name=skill, session_id=session)
+        return [(r["skill"], r["session_id"], r["model"], r["provider"]) for r in rows()]
+
+    for skill in version:
+        finished(skill, "v1", MODEL)
+    assert load("csv-totals", "h-1", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]
+    assert load("csv-totals", "h-1", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]  # once per session
+    assert load("csv-totals", "s-1", MODEL) == [("csv-totals", "h-1", HAIKU, "anthropic")]  # it has a verdict there
+    assert load("hub-skill", "h-2", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]  # not written by the agent
+    assert load("never-tried", "h-2", HAIKU) == [("csv-totals", "h-1", HAIKU, "anthropic")]
+    # Dedupe: this version has a verdict on Haiku now, so another Haiku session queues nothing.
+    finished("csv-totals", "v1", HAIKU)
+    assert len(load("csv-totals", "h-3", HAIKU)) == 1
+    version["csv-totals"] = "v2"  # until the agent changes it
+    assert ("csv-totals", "h-4", HAIKU, "anthropic") in load("csv-totals", "h-4", HAIKU)
+
+
+def test_the_runner_tries_changes_then_the_most_used_rechecks_within_the_budget(runner, monkeypatch):
+    library = {name: SimpleNamespace(name=name, content_hash=lambda: "v1")
+               for name in ("csv-totals", "json-format", "team-changelog")}
+    monkeypatch.setattr(cli.skills, "library", lambda: library)
+    monkeypatch.setattr(cli, "_auto_tasks", lambda name, *_: [store.Task(1, name, "Do it", None, "mined", None)])
+    monkeypatch.setattr(cli.usage, "scan", lambda _wanted: {
+        "json-format": {HAIKU: usage.Usage(sessions=2)}, "team-changelog": {HAIKU: usage.Usage(sessions=5)}})
+    ran = []
+
+    def try_skills(_source, _library, selected, opts, budget, *_args, mode, after, **_kwargs):
+        [name] = selected
+        ran.append((name, opts.model, opts.provider))
+        budget.spent += 0.6  # two trials spend the day's $1.00
+        result = outcome(scoring.NEUTRAL, store.start_trial(name, "v1", opts.model or MODEL, True, None, mode))
+        after(name, result)
+        return [(name, result)]
+
+    monkeypatch.setattr(cli, "_try_skills", try_skills)
+    queue("s1")
+    for skill in ("json-format", "team-changelog"):
+        store.queue_recheck(skill, f"h-{skill}", HAIKU, "anthropic")
+        store.end_session(f"h-{skill}")
+    auto.launch_ready(ON)
+    assert runner() == 0
+    assert ran == [("csv-totals", None, None), ("team-changelog", HAIKU, "anthropic")]
+    assert {r["skill"]: r["state"] for r in rows()} == {"csv-totals": "done", "team-changelog": "done",
+                                                        "json-format": "pending"}  # tomorrow's budget
+    texts = [n["text"] for n in store.notices(10)]
+    assert any(f"you used `team-changelog` on {MODEL}, which it was never tested on" in t for t in texts)
+
+
+def test_the_first_run_notice_is_posted_once_and_only_in_its_own_chat(monkeypatch):
+    monkeypatch.setattr(auto.mining, "session_origin",
+                        lambda session: {"tg-1": ("telegram", "42", "dm-42")}.get(session, (None, None, None)))
+    [text] = turn(session_id="tg-1", platform="telegram", sender="42")
+    assert text.startswith("Skill Court is on") and "$1.00 a day" in text and "`hermes court auto off`" in text
+    assert turn(session_id="tg-2", platform="telegram", sender="7") == []
+    assert turn(session_id="cli-9", platform="cli") == []  # it was the Telegram sender's, not the owner's
+    assert turn(session_id="tg-1", platform="telegram", sender="42") == []
+    assert not store.first_run_due()
+
+
+def test_no_first_run_notice_once_the_user_has_chosen():
+    assert court("auto", "on", "--budget", "2") == 0
+    assert turn() == [] and not store.first_run_due()
 
 
 def test_an_unexpected_runner_failure_closes_the_change_and_says_so(runner, monkeypatch, started):

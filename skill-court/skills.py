@@ -38,20 +38,31 @@ def _usage(skills_dir: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _located(name: str, roots, usage: dict) -> Skill | None:
+    from tools.skills_tool import locate_skill
+
+    error, skill_dir, _skill_md = locate_skill(name, None, roots)
+    if error or skill_dir is None:
+        return None
+    record = usage.get(name)
+    created_by = record.get("created_by") if isinstance(record, dict) else None
+    locked = bool(record.get("locked")) if isinstance(record, dict) else False
+    return Skill(name=name, path=Path(skill_dir), created_by=created_by, locked=locked)
+
+
 def library() -> dict[str, Skill]:
     """Every skill the profile can load (including disabled ones), by the name ``skill_view`` takes."""
-    from tools.skills_tool import find_all_skills, locate_skill, skill_search_dirs
+    from tools.skills_tool import find_all_skills, skill_search_dirs
 
     roots, active_dir = skill_search_dirs()
     usage = _usage(active_dir)
-    found: dict[str, Skill] = {}
-    for entry in find_all_skills(skip_disabled=True):
-        name = entry["name"]
-        error, skill_dir, _skill_md = locate_skill(name, None, roots)
-        if error or skill_dir is None:
-            continue
-        record = usage.get(name)
-        created_by = record.get("created_by") if isinstance(record, dict) else None
-        locked = bool(record.get("locked")) if isinstance(record, dict) else False
-        found[name] = Skill(name=name, path=Path(skill_dir), created_by=created_by, locked=locked)
-    return found
+    found = (_located(entry["name"], roots, usage) for entry in find_all_skills(skip_disabled=True))
+    return {skill.name: skill for skill in found if skill is not None}
+
+
+def find(name: str) -> Skill | None:
+    """One skill by the name ``skill_view`` takes, without reading the whole catalog."""
+    from tools.skills_tool import skill_search_dirs
+
+    roots, active_dir = skill_search_dirs()
+    return _located(name, roots, _usage(active_dir))

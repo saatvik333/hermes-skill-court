@@ -1,12 +1,19 @@
 """The two replay profiles of a trial: one with the skill under test, one without it.
 
 Both are fresh clones of the source profile (config, keys, SOUL, memory, skills), so a replay sees
-the user's model, prompt and skills. Each clone is then cut off from everything outside its sandbox:
-Docker backend, one fresh container per session, no host mounts, extra `docker run` flags,
-container env or forwarded host env; no MCP servers, external memory provider or other plugins;
-no tools that run on the host or keep state between replays (code execution, browser, computer
-use, cron, memory writes, session search, connections) and no media generation. Skill edits are
-staged instead of applied, and approval prompts are denied rather than auto-approved.
+the user's model, prompt and skills. Each clone is then cut off from everything outside it: no MCP
+servers, external memory provider, other plugins, shell hooks or inline shell in skills; skill
+edits are staged instead of applied, and approval prompts are denied rather than auto-approved.
+
+A clone runs in one of two modes:
+
+- ``sandbox``: the terminal and file tools run in a fresh Docker container per session, with no
+  host mounts, extra ``docker run`` flags, container env or forwarded host env; the tools that run
+  on the host or keep state between replays (code execution, browser, computer use, cron, memory
+  writes, session search, connections) and media generation are turned off.
+- ``answer-only``, for when no container runtime answers: only the toolsets in
+  ``ANSWER_ONLY_TOOLSETS`` are left on. Every other toolset Hermes knows is disabled, including ones
+  added to Hermes later, so nothing a replay does can touch the host.
 """
 
 from __future__ import annotations
@@ -22,10 +29,32 @@ from hermes_constants import get_default_hermes_root
 from .procs import CommandError, container_binary, hermes, run
 
 ARMS = ("with", "without")
+SANDBOX, ANSWER_ONLY = "sandbox", "answer-only"
+# The toolsets an answer-only replay keeps, each read-only or confined to the replay profile
+# (``toolsets.py``): skills (``skill_manage`` edits are staged by ``skills.write_approval``), the
+# todo list, and web search and extraction.
+ANSWER_ONLY_TOOLSETS = ("skills", "todo", "web")
 # The profile description doubles as the ownership marker: Skill Court only ever deletes or
 # rebuilds a profile that carries it, never one the user happened to name the same way.
 DESCRIPTION = "Skill Court replay sandbox (created and deleted by the skill-court plugin)"
 MAX_TURNS = 60
+# Both modes.
+_ISOLATION = (
+    # The egress proxy's credentials belong to the source profile and are not cloned.
+    ("proxy.enabled", "false"),
+    ("mcp_servers", "{}"),
+    ("memory.provider", ""),
+    ("plugins.enabled", "[]"),
+    ("skills.write_approval", "true"),
+    # A skill's !`command` snippets would run on the host when the skill is loaded.
+    ("skills.inline_shell", "false"),
+    # Prompts are answered by single_query_mode (deny), never by the smart-approval guardian, and
+    # the user's shell hooks, which run on the host, do not run in replays.
+    ("approvals.mode", "manual"),
+    ("approvals.single_query_mode", "deny"),
+    ("hooks", "{}"),
+    ("hooks_auto_accept", "false"),
+)
 _SANDBOX_SETTINGS = (
     ("terminal.backend", "docker"),
     # One fresh container per session; it outlives the session long enough for the check, and
@@ -39,27 +68,16 @@ _SANDBOX_SETTINGS = (
     ("terminal.docker_env", "{}"),
     ("terminal.docker_forward_env", "[]"),
     ("terminal.env_passthrough", "[]"),
-    # The egress proxy's credentials belong to the source profile and are not cloned.
-    ("proxy.enabled", "false"),
-    ("mcp_servers", "{}"),
-    ("memory.provider", ""),
-    ("plugins.enabled", "[]"),
-    ("skills.write_approval", "true"),
-    # Prompts are answered by single_query_mode (deny), never by the smart-approval guardian, and
-    # the user's shell hooks, which run on the host, do not run in replays.
-    ("approvals.mode", "manual"),
-    ("approvals.single_query_mode", "deny"),
-    ("hooks", "{}"),
-    ("hooks_auto_accept", "false"),
 )
-_DISABLED_TOOLSETS = ("code_execution", "computer_use", "browser", "cronjob", "session_search",
-                      "connections", "memory", "kanban", "image_gen", "video_gen", "tts")
+_SANDBOX_DISABLED_TOOLSETS = ("code_execution", "computer_use", "browser", "cronjob", "session_search",
+                              "connections", "memory", "kanban", "image_gen", "video_gen", "tts")
 
 
 @dataclass(frozen=True)
 class Arms:
     source: str
     profiles: dict[str, str]  # arm -> profile name
+    mode: str  # SANDBOX or ANSWER_ONLY
 
 
 def arm_profile(source: str, arm: str) -> str:
@@ -68,8 +86,37 @@ def arm_profile(source: str, arm: str) -> str:
     return f"court-{hashlib.sha256(source.encode()).hexdigest()[:8]}-{arm}"
 
 
-def for_source(source: str) -> Arms:
-    return Arms(source=source, profiles={arm: arm_profile(source, arm) for arm in ARMS})
+def for_source(source: str, mode: str) -> Arms:
+    return Arms(source=source, profiles={arm: arm_profile(source, arm) for arm in ARMS}, mode=mode)
+
+
+def sandbox_unavailable() -> str | None:
+    """Why replays cannot run in Docker sandboxes now (no container runtime answers ``version``), or
+    None when they can."""
+    try:
+        run([container_binary(), "version"], timeout=60)
+    except CommandError as exc:
+        return str(exc)
+    return None
+
+
+def answer_only_disabled(already: list[str]) -> list[str]:
+    """``agent.disabled_toolsets`` for an answer-only replay: the user's own (``already``) and every
+    toolset Hermes knows whose tools all lie outside ``ANSWER_ONLY_TOOLSETS``. Hermes subtracts this
+    list last, whatever turned a toolset on (the platform list, the coding posture, a context
+    engine), so only the allowed toolsets' tools remain. Refused when some tool outside them would
+    still be left, which only a toolset mixing allowed and other tools could do."""
+    from toolsets import get_toolset_names, resolve_toolset
+
+    allowed = {tool for name in ANSWER_ONLY_TOOLSETS for tool in resolve_toolset(name)}
+    names = get_toolset_names()
+    off = [name for name in names if name not in ANSWER_ONLY_TOOLSETS and not allowed & set(resolve_toolset(name))]
+    left = {tool for name in names for tool in resolve_toolset(name)} - allowed
+    left -= {tool for name in off for tool in resolve_toolset(name)}
+    if left:
+        raise CommandError(f"answer-only replays cannot turn off {', '.join(sorted(left))} without turning off "
+                           f"{', '.join(ANSWER_ONLY_TOOLSETS)} too; no replay was run")
+    return sorted({*already, *off})
 
 
 def profile_home(name: str) -> Path:
@@ -111,28 +158,37 @@ def _remove_sandboxes(profile: str) -> None:
         run([docker, "rm", "-f", *ids], timeout=120, check=False)
 
 
-def _delete(profile: str) -> None:
-    _remove_sandboxes(profile)
+def _delete(profile: str, mode: str) -> None:
+    # An answer-only replay opened no sandbox, and no container runtime may be there to ask.
+    if mode == SANDBOX:
+        _remove_sandboxes(profile)
     hermes("profile", "delete", "-y", profile)
 
 
-def _build(source: str, profile: str) -> None:
+def _build(source: str, profile: str, mode: str) -> None:
     if profile_home(profile).exists():
         if not _owned(profile):
             raise CommandError(f"a profile named '{profile}' already exists and was not created by Skill Court; "
                                "rename it, or remove it yourself, before running a trial")
-        _delete(profile)
+        _delete(profile, mode)
     hermes("profile", "create", profile, "--clone-from", source, "--no-alias", "--description", DESCRIPTION)
-    for key, value in _SANDBOX_SETTINGS:
+    for key, value in _ISOLATION + (_SANDBOX_SETTINGS if mode == SANDBOX else ()):
         hermes("-p", profile, "config", "set", key, value, "--force")
-    hermes("-p", profile, "tools", "disable", *_DISABLED_TOOLSETS)
+    if mode == SANDBOX:
+        hermes("-p", profile, "tools", "disable", *_SANDBOX_DISABLED_TOOLSETS)
+        return
+    from agent.skill_utils import parse_config_string_list
+
+    already = parse_config_string_list(_config_json(profile, "agent.disabled_toolsets"))
+    hermes("-p", profile, "config", "set", "agent.disabled_toolsets", json.dumps(answer_only_disabled(already)),
+           "--force")
 
 
 def prepare(arms: Arms) -> None:
     """Clone both replay profiles fresh from the source, so a skill's trial never inherits state
     from an earlier one."""
     with ThreadPoolExecutor(max_workers=len(ARMS)) as pool:
-        for future in [pool.submit(_build, arms.source, p) for p in arms.profiles.values()]:
+        for future in [pool.submit(_build, arms.source, p, arms.mode) for p in arms.profiles.values()]:
             future.result()
 
 
@@ -148,6 +204,6 @@ def remove(arms: Arms) -> None:
     for profile in arms.profiles.values():
         if profile_home(profile).exists() and _owned(profile):
             try:
-                _delete(profile)
+                _delete(profile, arms.mode)
             except CommandError as exc:
                 print(f"Skill Court: could not remove replay profile {profile}: {exc}")

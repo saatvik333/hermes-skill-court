@@ -14,22 +14,34 @@ from typing import Any
 from . import store
 from .skills_index import filter_skills_list, skill_key, strip_request
 
-_SESSION_MODEL_CAP = 1024
-# Tool hooks carry no model, so remember the model each session last sent a request with.
-_session_model: OrderedDict[str, str] = OrderedDict()
+_SESSION_ROUTE_CAP = 1024
+# Tool and lifecycle hooks carry no model, so remember the model (and its provider) each session last
+# sent a request with.
+_session_route: OrderedDict[str, tuple[str, str | None]] = OrderedDict()
 
 
-def _remember_model(session_id: str, model: str) -> None:
+def _remember(session_id: str, model: str, provider: str) -> None:
     if not session_id or not model:
         return
-    _session_model[session_id] = model
-    _session_model.move_to_end(session_id)
-    while len(_session_model) > _SESSION_MODEL_CAP:
-        _session_model.popitem(last=False)
+    _session_route[session_id] = (model, provider or None)
+    _session_route.move_to_end(session_id)
+    while len(_session_route) > _SESSION_ROUTE_CAP:
+        _session_route.popitem(last=False)
 
 
-def on_llm_request(request: Any = None, session_id: str = "", model: str = "", **_: Any) -> dict | None:
-    _remember_model(session_id, model)
+def session_route(session_id: str) -> tuple[str, str | None] | None:
+    """``(model, provider)`` of the session's latest model request in this process, if any."""
+    return _session_route.get(session_id)
+
+
+def _session_model(session_id: str) -> str:
+    route = _session_route.get(session_id)
+    return route[0] if route else ""
+
+
+def on_llm_request(request: Any = None, session_id: str = "", model: str = "", provider: str = "",
+                   **_: Any) -> dict | None:
+    _remember(session_id, model, provider)
     if not isinstance(request, dict):
         return None
     hidden = store.hidden_for(model)
@@ -48,14 +60,14 @@ def on_llm_request(request: Any = None, session_id: str = "", model: str = "", *
 def on_transform_tool_result(tool_name: str = "", result: Any = None, session_id: str = "", **_: Any) -> str | None:
     if tool_name != "skills_list" or not isinstance(result, str):
         return None
-    hidden = store.hidden_for(_session_model.get(session_id, ""))
+    hidden = store.hidden_for(_session_model(session_id))
     return filter_skills_list(result, frozenset(hidden)) if hidden else None
 
 
 def on_pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "", **_: Any) -> dict | None:
     if tool_name != "skill_view" or not isinstance(args, dict) or not isinstance(args.get("name"), str):
         return None
-    model = _session_model.get(session_id, "")
+    model = _session_model(session_id)
     skill = skill_key(args["name"])
     reason = store.hidden_for(model).get(skill)
     if reason is None:

@@ -82,15 +82,21 @@ function tokenCell(v) {
 
 const scopeName = model => (model === ANY_MODEL ? 'every model' : model)
 
-// Where a verdict's pair outcomes came from, as the CLI report words it: "2 checked, 1 judged".
-const describeSources = sources =>
-  [
-    ['check', 'checked'],
-    ['judge', 'judged']
-  ]
-    .filter(([key]) => sources[key])
-    .map(([key, label]) => `${sources[key]} ${label}`)
-    .join(', ') || 'no outcomes'
+const ANSWER_ONLY = 'answer-only'
+
+// Where a verdict's pair outcomes came from, as the CLI report words it: "2 checked, 1 judged", or
+// "3 judged, answer-only" for a trial that ran without sandboxes.
+const describeSources = (sources, mode) => {
+  const text =
+    [
+      ['check', 'checked'],
+      ['judge', 'judged']
+    ]
+      .filter(([key]) => sources[key])
+      .map(([key, label]) => `${sources[key]} ${label}`)
+      .join(', ') || 'no outcomes'
+  return mode === ANSWER_ONLY ? `${text}, ${ANSWER_ONLY}` : text
+}
 
 function Cause({ row }) {
   if (!row.cause) {
@@ -211,6 +217,12 @@ function VerdictRow({ row, act, applyFix, pending, error }) {
                   className: 'text-[0.6875rem] font-normal text-(--ui-text-tertiary)',
                   children: 'skill changed since this verdict'
                 })
+              : null,
+            row.inUse
+              ? jsx('div', {
+                  className: 'max-w-64 text-[0.6875rem] font-normal text-(--ui-text-tertiary)',
+                  children: `In use: ${row.inUse}`
+                })
               : null
           ]
         })
@@ -246,7 +258,7 @@ function VerdictRow({ row, act, applyFix, pending, error }) {
             row.sources
               ? jsx('div', {
                   className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
-                  children: describeSources(row.sources)
+                  children: describeSources(row.sources, row.mode)
                 })
               : null
           ]
@@ -312,12 +324,15 @@ function ManualQuarantine({ entries, act, pendingKey, errors }) {
 
 const usd = x => `$${(x ?? 0).toFixed(2)}`
 
-function Summary({ verdicts, quarantine, auto }) {
+const NOTE = 'max-w-prose text-[0.6875rem] text-(--ui-text-tertiary)'
+
+function Summary({ verdicts, quarantine, auto, usageLabel }) {
   const counts = verdicts.reduce((acc, v) => ({ ...acc, [v.verdict]: (acc[v.verdict] ?? 0) + 1 }), {})
   const parts = ['hurts', 'helps', 'neutral', 'inconclusive']
     .filter(k => counts[k])
     .map(k => `${counts[k]} ${k === 'hurts' ? 'hurt' : k === 'helps' ? 'help' : k}`)
   const judged = verdicts.some(v => v.sources?.judge)
+  const answerOnly = verdicts.some(v => v.mode === ANSWER_ONLY)
   return jsxs('div', {
     className: 'flex flex-col gap-1 text-sm text-(--ui-text-secondary)',
     children: [
@@ -331,11 +346,19 @@ function Summary({ verdicts, quarantine, auto }) {
       }),
       judged
         ? jsx('p', {
-            className: 'max-w-prose text-[0.6875rem] text-(--ui-text-tertiary)',
+            className: NOTE,
             children:
               'Judged tasks have no check: a judge model compared both runs’ answers and files, without knowing which run had the skill, in both orders. A run counts as failed only when the judge preferred the other run both times.'
           })
-        : null
+        : null,
+      answerOnly
+        ? jsx('p', {
+            className: NOTE,
+            children:
+              'Answer-only verdicts ran without a Docker sandbox: the replays had read-only tools only, and every pair was judged on the final answers. They measure what a skill makes the agent say or decide, not procedures that need tools.'
+          })
+        : null,
+      usageLabel ? jsx('p', { className: NOTE, children: `“In use” is ${usageLabel}.` }) : null
     ]
   })
 }
@@ -344,6 +367,9 @@ function SkillCourtPage({ rest, source }) {
   const queryClient = useQueryClient()
   const queryKey = [source, 'verdicts']
   const query = useQuery({ queryKey, queryFn: () => rest('/verdicts'), refetchInterval: 30_000 })
+  // Usage evidence reads the whole session history, so it is fetched when the page opens and on
+  // Refresh, not on every poll.
+  const usageQuery = useQuery({ queryKey: [source, 'usage'], queryFn: () => rest('/usage'), staleTime: Infinity })
   const [pendingKey, setPendingKey] = useState(null)
   const [errors, setErrors] = useState({})
   const [announcement, setAnnouncement] = useState('')
@@ -407,7 +433,7 @@ function SkillCourtPage({ rest, source }) {
     }
     setManualRefresh(true)
     try {
-      await query.refetch()
+      await Promise.all([query.refetch(), usageQuery.refetch()])
     } finally {
       setManualRefresh(false)
     }
@@ -424,6 +450,7 @@ function SkillCourtPage({ rest, source }) {
     })
   } else {
     const { verdicts, quarantine, auto, appeals } = query.data
+    const inUse = usageQuery.data?.skills ?? {}
     const hiddenBy = v =>
       quarantine.filter(q => q.skill === v.skill && (q.model === v.model || q.model === ANY_MODEL)).map(q => q.model)
     const shown = new Set(verdicts.flatMap(v => hiddenBy(v).map(m => `${v.skill}\u0000${m}`)))
@@ -442,16 +469,23 @@ function SkillCourtPage({ rest, source }) {
           (VERDICT_ORDER[a.verdict] ?? 9) - (VERDICT_ORDER[b.verdict] ?? 9) ||
           a.model.localeCompare(b.model)
       )
-      .map(v => ({
+      // The usage line goes on a skill's first row only: it is about the skill, not one model's verdict.
+      .map((v, index, sorted) => ({
         ...v,
         hiddenBy: hiddenBy(v),
-        appeal: (appeals ?? []).find(a => a.skill === v.skill && a.model === v.model)
+        appeal: (appeals ?? []).find(a => a.skill === v.skill && a.model === v.model),
+        inUse: index === 0 || sorted[index - 1].skill !== v.skill ? inUse[v.skill] : undefined
       }))
     body = verdicts.length
       ? jsxs('div', {
           className: 'flex flex-col gap-6',
           children: [
-            jsx(Summary, { auto, quarantine, verdicts }),
+            jsx(Summary, {
+              auto,
+              quarantine,
+              usageLabel: Object.keys(inUse).length ? usageQuery.data.label : undefined,
+              verdicts
+            }),
             jsx('div', {
               className: 'overflow-x-auto',
               children: jsxs('table', {
@@ -493,7 +527,8 @@ function SkillCourtPage({ rest, source }) {
           ]
         })
       : jsx(EmptyState, {
-          description: 'Run `hermes court trial --all` in a terminal. Each trial replays tasks with and without a skill.',
+          description:
+            'With automatic trials on, a skill gets a verdict after the agent writes or changes it. To try existing skills now, run `hermes court trial --all` in a terminal.',
           title: 'No verdicts yet'
         })
   }

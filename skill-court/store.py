@@ -170,6 +170,38 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (
         "ALTER TABLE notices ADD COLUMN chat_id TEXT",
     ),
+    # 6: answer-only trials, re-checks on the model a skill was used on, and the first-run notice.
+    (
+        # ``sandbox``: replays in Docker sandboxes, checks run there. ``answer-only``: no sandbox and
+        # read-only tools only, every pair judged on the final answers.
+        "ALTER TABLE trials ADD COLUMN mode TEXT NOT NULL DEFAULT 'sandbox'",
+        # The queue gains the model its trial runs on: '' for a change (the profile's model), or the
+        # model a session loaded the skill on (a re-check), with that session's provider. The primary
+        # key changes, so the table is rebuilt with its rows.
+        """CREATE TABLE auto_queue_6 (
+            skill           TEXT NOT NULL,
+            session_id      TEXT NOT NULL,
+            model           TEXT NOT NULL DEFAULT '',
+            provider        TEXT,
+            state           TEXT NOT NULL CHECK (state IN ('pending', 'queued', 'running', 'done')),
+            changed_at      TEXT NOT NULL,
+            ended_at        TEXT,
+            trial_id        INTEGER REFERENCES trials (id) ON DELETE SET NULL,
+            note            TEXT,
+            last_attempt_at TEXT,
+            PRIMARY KEY (skill, session_id, model)
+        )""",
+        "INSERT INTO auto_queue_6 (skill, session_id, state, changed_at, ended_at, trial_id, note, last_attempt_at)"
+        " SELECT skill, session_id, state, changed_at, ended_at, trial_id, note, last_attempt_at FROM auto_queue",
+        "DROP TABLE auto_queue",
+        "ALTER TABLE auto_queue_6 RENAME TO auto_queue",
+        # The notice that told the owner automatic trials are on by default: queued once per profile.
+        """CREATE TABLE first_run (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            notice_id  INTEGER NOT NULL REFERENCES notices (id),
+            created_at TEXT NOT NULL
+        )""",
+    ),
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -293,11 +325,14 @@ def remove_task(task_id: int) -> bool:
 
 # --- trials and runs --------------------------------------------------------------------------
 
-def start_trial(skill: str, skill_hash: str, model: str, auto: bool = False, appeal_id: int | None = None) -> int:
+def start_trial(skill: str, skill_hash: str, model: str, auto: bool = False, appeal_id: int | None = None,
+                mode: str = "sandbox") -> int:
+    """``mode``: how the replays run (``arms.SANDBOX`` or ``arms.ANSWER_ONLY``)."""
     with closing(_connect()) as conn, conn:
         cur = conn.execute(
-            "INSERT INTO trials (skill, skill_hash, model, started_at, auto, appeal_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (skill, skill_hash, model, _now(), int(auto), appeal_id),
+            "INSERT INTO trials (skill, skill_hash, model, started_at, auto, appeal_id, mode)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (skill, skill_hash, model, _now(), int(auto), appeal_id, mode),
         )
         return int(cur.lastrowid)
 
@@ -368,6 +403,22 @@ def latest_trials(skills: Iterable[str] | None = None) -> list[dict]:
         ).fetchall()
     wanted = set(skills) if skills is not None else None
     return [dict(r) for r in rows if wanted is None or r["skill"] in wanted]
+
+
+def tested_on_other_models(skill: str, model: str) -> bool:
+    """Whether a finished trial judged any version of ``skill`` on a model other than ``model``."""
+    with closing(_connect()) as conn:
+        return bool(conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM trials WHERE skill = ? AND model != ? AND finished_at IS NOT NULL)",
+            (skill, model)).fetchone()[0])
+
+
+def has_verdict(skill: str, skill_hash: str, model: str) -> bool:
+    """Whether a finished trial judged this version of ``skill`` (its content hash) on ``model``."""
+    with closing(_connect()) as conn:
+        return bool(conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM trials WHERE skill = ? AND skill_hash = ? AND model = ?"
+            " AND finished_at IS NOT NULL)", (skill, skill_hash, model)).fetchone()[0])
 
 
 # --- appeals ----------------------------------------------------------------------------------
@@ -443,7 +494,8 @@ class AutoSettings:
     daily_judge_tokens: int
 
 
-AUTO_DEFAULTS = AutoSettings(enabled=False, daily_budget_usd=2.0, quiet_minutes=15.0, daily_judge_tokens=300_000)
+# A new install tests skills automatically within $1.00 a day; ``auto off`` or ``auto on`` stores a row.
+AUTO_DEFAULTS = AutoSettings(enabled=True, daily_budget_usd=1.0, quiet_minutes=15.0, daily_judge_tokens=300_000)
 
 
 def auto_settings() -> AutoSettings:
@@ -467,16 +519,30 @@ def set_auto_settings(settings: AutoSettings) -> None:
 
 
 def queue_change(skill: str, session_id: str) -> None:
-    """The agent created or changed ``skill`` in ``session_id``: (re)start its wait for a trial.
-    A change during a running trial makes that trial's result stale for this row, so it waits again;
-    a new change is tried as soon as it is ready, whenever an earlier one was last attempted."""
+    """The agent created or changed ``skill`` in ``session_id``: (re)start its wait for a trial on the
+    profile's model. A change during a running trial makes that trial's result stale for this row, so
+    it waits again; a new change is tried as soon as it is ready, whenever an earlier one was last
+    attempted."""
     with closing(_connect()) as conn, conn:
         conn.execute(
             "INSERT INTO auto_queue (skill, session_id, state, changed_at) VALUES (?, ?, 'pending', ?)"
-            " ON CONFLICT (skill, session_id) DO UPDATE SET state = 'pending', changed_at = excluded.changed_at,"
-            " ended_at = NULL, trial_id = NULL, note = NULL, last_attempt_at = NULL",
+            " ON CONFLICT (skill, session_id, model) DO UPDATE SET state = 'pending',"
+            " changed_at = excluded.changed_at, ended_at = NULL, trial_id = NULL, note = NULL, last_attempt_at = NULL",
             (skill, session_id, _now()),
         )
+
+
+def queue_recheck(skill: str, session_id: str, model: str, provider: str | None) -> bool:
+    """``session_id`` loaded ``skill`` on ``model``, which has no verdict on its current version: it
+    waits like a change for that session to end or go quiet, then is tried on ``model`` through
+    ``provider``. One row per session and model, never reset, so loading the skill again in that
+    session queues nothing new; False when the row exists."""
+    with closing(_connect()) as conn, conn:
+        return conn.execute(
+            "INSERT INTO auto_queue (skill, session_id, model, provider, state, changed_at)"
+            " VALUES (?, ?, ?, ?, 'pending', ?) ON CONFLICT DO NOTHING",
+            (skill, session_id, model, provider, _now()),
+        ).rowcount == 1
 
 
 def end_session(session_id: str) -> int:
@@ -502,33 +568,44 @@ def claim_ready(quiet_before: str, retry_before: str) -> list[str]:
     return sorted({skill for (skill,) in rows})
 
 
-def start_queued() -> dict[str, list[str]]:
-    """Claim every queued change for this runner: ``{skill: [sessions that changed it]}``."""
+@dataclass(frozen=True)
+class Queued:
+    """The queued rows of one skill and model that a runner took: one trial on ``model`` ('' for a
+    change, which runs on the profile's model) through ``provider``."""
+    skill: str
+    model: str
+    provider: str | None
+    sessions: list[str]  # the sessions that changed or loaded it
+
+
+def start_queued() -> list[Queued]:
+    """Claim every queued row for this runner, one ``Queued`` per skill and model."""
     with closing(_connect()) as conn, conn:
         rows = conn.execute(
-            "UPDATE auto_queue SET state = 'running' WHERE state = 'queued' RETURNING skill, session_id"
+            "UPDATE auto_queue SET state = 'running' WHERE state = 'queued' RETURNING skill, model, session_id, provider"
         ).fetchall()
-    claimed: dict[str, list[str]] = {}
-    for skill, session_id in sorted(rows):
-        claimed.setdefault(skill, []).append(session_id)
-    return claimed
+    claimed: dict[tuple[str, str], Queued] = {}
+    for skill, model, session_id, provider in sorted(rows, key=lambda row: row[:3]):
+        found = claimed.setdefault((skill, model), Queued(skill, model, provider, []))
+        found.sessions.append(session_id)
+    return list(claimed.values())
 
 
-def finish_queued(skill: str, trial_id: int | None, note: str) -> int:
-    """Close the running rows of ``skill``; a row the agent changed again meanwhile stays pending.
-    Returns how many rows it closed."""
+def finish_queued(skill: str, model: str, trial_id: int | None, note: str) -> int:
+    """Close the running rows of ``skill`` on ``model``; a row the agent changed again meanwhile stays
+    pending. Returns how many rows it closed."""
     with closing(_connect()) as conn, conn:
         return conn.execute(
-            "UPDATE auto_queue SET state = 'done', trial_id = ?, note = ? WHERE skill = ? AND state = 'running'",
-            (trial_id, note, skill),
+            "UPDATE auto_queue SET state = 'done', trial_id = ?, note = ? WHERE skill = ? AND model = ?"
+            " AND state = 'running'", (trial_id, note, skill, model),
         ).rowcount
 
 
-def defer_queued(skill: str, note: str) -> None:
-    """Put the running rows of ``skill`` back to wait for the next chance to run."""
+def defer_queued(skill: str, model: str, note: str) -> None:
+    """Put the running rows of ``skill`` on ``model`` back to wait for the next chance to run."""
     with closing(_connect()) as conn, conn:
-        conn.execute("UPDATE auto_queue SET state = 'pending', note = ? WHERE skill = ? AND state = 'running'",
-                     (note, skill))
+        conn.execute("UPDATE auto_queue SET state = 'pending', note = ? WHERE skill = ? AND model = ?"
+                     " AND state = 'running'", (note, skill, model))
 
 
 def requeue_orphans() -> int:
@@ -619,12 +696,38 @@ class Origin:
     chat_id: str | None = None
 
 
+def _insert_notice(conn: sqlite3.Connection, trial_id: int | None, text: str, origin: Origin) -> int:
+    return int(conn.execute(
+        "INSERT INTO notices (trial_id, text, created_at, session_id, platform, sender, chat_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (trial_id, text, _now(), origin.session_id, origin.platform, origin.sender, origin.chat_id)).lastrowid)
+
+
 def add_notice(trial_id: int | None, text: str, origin: Origin) -> None:
     with closing(_connect()) as conn, conn:
-        conn.execute(
-            "INSERT INTO notices (trial_id, text, created_at, session_id, platform, sender, chat_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (trial_id, text, _now(), origin.session_id, origin.platform, origin.sender, origin.chat_id))
+        _insert_notice(conn, trial_id, text, origin)
+
+
+# Due while no first-run notice was queued and automatic trials run on their defaults: once
+# ``auto on`` or ``auto off`` stored settings, the user has chosen and is not told again.
+_FIRST_RUN_DUE = "SELECT NOT EXISTS (SELECT 1 FROM first_run) AND NOT EXISTS (SELECT 1 FROM auto_settings)"
+
+
+def first_run_due() -> bool:
+    with closing(_connect()) as conn:
+        return bool(conn.execute(_FIRST_RUN_DUE).fetchone()[0])
+
+
+def queue_first_run_notice(text: str, origin: Origin) -> bool:
+    """Queue the first-run notice for ``origin`` if it is still due; False otherwise. The write lock
+    is taken before the check is repeated, so two sessions starting at once queue it once."""
+    with closing(_connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute(_FIRST_RUN_DUE).fetchone()[0]:
+            return False
+        notice_id = _insert_notice(conn, None, text, origin)
+        conn.execute("INSERT INTO first_run (id, notice_id, created_at) VALUES (1, ?, ?)", (notice_id, _now()))
+        return True
 
 
 def has_notices_for(platform: str, sender: str) -> bool:

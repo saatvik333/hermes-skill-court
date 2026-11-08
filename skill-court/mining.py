@@ -9,8 +9,9 @@ told the verdict. History is read through the public, read-only ``SessionDB``.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from .skills_index import skill_key
 
@@ -33,8 +34,8 @@ def text_of(content: Any) -> str:
     return ""
 
 
-def _calls(tool_calls: Any) -> Iterable[tuple[str, Any]]:
-    """``(tool name, decoded arguments)`` per well-formed call."""
+def calls(tool_calls: Any) -> Iterable[tuple[str | None, str, Any]]:
+    """``(call id, tool name, decoded arguments)`` per well-formed call."""
     for call in tool_calls if isinstance(tool_calls, list) else ():
         function = call.get("function") if isinstance(call, dict) else None
         if not isinstance(function, dict) or not isinstance(function.get("name"), str):
@@ -44,13 +45,21 @@ def _calls(tool_calls: Any) -> Iterable[tuple[str, Any]]:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
         except ValueError:
             continue
-        yield function["name"], args
+        call_id = call.get("id")
+        yield (call_id if isinstance(call_id, str) else None), function["name"], args
+
+
+def viewed_skill(tool: str, args: Any) -> str | None:
+    """The skill a ``skill_view`` call loads; None for other calls and for reads of a skill's linked files."""
+    if tool == "skill_view" and isinstance(args, dict) and isinstance(args.get("name"), str) and not args.get("file_path"):
+        return skill_key(args["name"])
+    return None
 
 
 def viewed_skills(tool_calls: Any) -> Iterable[str]:
-    for name, args in _calls(tool_calls):
-        if name == "skill_view" and isinstance(args, dict) and isinstance(args.get("name"), str) and not args.get("file_path"):
-            yield skill_key(args["name"])
+    for _id, tool, args in calls(tool_calls):
+        if (skill := viewed_skill(tool, args)) is not None:
+            yield skill
 
 
 def tasks_in_session(messages: list[dict], wanted: frozenset[str] | None) -> dict[str, str]:
@@ -76,7 +85,7 @@ def requests_in_session(messages: list[dict]) -> list[str]:
         role = message.get("role")
         if role == "user":
             turns.append((text_of(message.get("content")), False))
-        elif role == "assistant" and turns and any(name == "skill_manage" for name, _ in _calls(message.get("tool_calls"))):
+        elif role == "assistant" and turns and any(tool == "skill_manage" for _id, tool, _args in calls(message.get("tool_calls"))):
             turns[-1] = (turns[-1][0], True)
     requests: list[str] = []
     for prompt, wrote_skill in turns:
@@ -118,37 +127,41 @@ def session_origin(session_id: str) -> tuple[str | None, str | None, str | None]
     return row.get("source") or None, row.get("user_id") or None, row.get("chat_id") or None
 
 
-def mine(wanted: Iterable[str] | None, per_skill: int) -> dict[str, list[MinedTask]]:
-    """Newest-first distinct prompts per skill, at most ``per_skill`` each."""
+def sessions() -> Iterator[tuple[dict, list[dict]]]:
+    """Every session of the active profile (including continuations and subagents) with its
+    messages; nothing for a profile that never ran a session. Wrap in ``contextlib.closing`` when
+    stopping early, so the database is closed then."""
     from hermes_constants import get_hermes_home
     from hermes_state import SessionDB
 
     if not (get_hermes_home() / "state.db").exists():
-        return {}  # a profile that has never run a session has no history to mine
-    wanted_set = frozenset(wanted) if wanted is not None else None
-    found: dict[str, list[MinedTask]] = {}
-    seen: set[tuple[str, str]] = set()
+        return
     db = SessionDB(read_only=True)
     try:
         offset = 0
-        while True:
-            sessions = db.list_sessions_rich(
+        while page := db.list_sessions_rich(
                 limit=_PAGE, offset=offset, include_children=True, project_compression_tips=False,
-                include_hidden=True, include_subagents=True, order_by_last_active=False)
-            if not sessions:
-                break
-            offset += len(sessions)
-            for session in sessions:
-                session_id = session.get("id")
-                if not session_id:
-                    continue
-                for skill, prompt in tasks_in_session(db.get_messages(session_id), wanted_set).items():
-                    bucket = found.setdefault(skill, [])
-                    if len(bucket) < per_skill and (skill, prompt) not in seen:
-                        seen.add((skill, prompt))
-                        bucket.append(MinedTask(skill=skill, prompt=prompt, session_id=session_id))
-            if wanted_set is not None and all(len(found.get(s, ())) >= per_skill for s in wanted_set):
-                break
+                include_hidden=True, include_subagents=True, order_by_last_active=False):
+            offset += len(page)
+            for session in page:
+                if session.get("id"):
+                    yield session, db.get_messages(session["id"])
     finally:
         db.close()
+
+
+def mine(wanted: Iterable[str] | None, per_skill: int) -> dict[str, list[MinedTask]]:
+    """Newest-first distinct prompts per skill, at most ``per_skill`` each."""
+    wanted_set = frozenset(wanted) if wanted is not None else None
+    found: dict[str, list[MinedTask]] = {}
+    seen: set[tuple[str, str]] = set()
+    with closing(sessions()) as history:
+        for session, messages in history:
+            for skill, prompt in tasks_in_session(messages, wanted_set).items():
+                bucket = found.setdefault(skill, [])
+                if len(bucket) < per_skill and (skill, prompt) not in seen:
+                    seen.add((skill, prompt))
+                    bucket.append(MinedTask(skill=skill, prompt=prompt, session_id=session["id"]))
+            if wanted_set is not None and all(len(found.get(s, ())) >= per_skill for s in wanted_set):
+                break
     return found

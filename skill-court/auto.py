@@ -1,17 +1,20 @@
 """Automatic trials: test a skill after the agent writes or changes it, within a daily budget.
 
-Off until ``hermes court auto on``. The ``on_skill_lifecycle`` hook queues each skill the agent
-creates, patches or edits, keyed by the session that changed it. When that session ends
-(``on_session_finalize``), or once the change has been quiet for ``quiet_minutes`` (checked at the
-start of any later turn), a detached ``hermes -p <profile> court trial --auto`` runs the queue in
-the background with the same sandboxed replay profiles as a manual trial, appending its output
-to ``plugin-data/skill-court/auto.log``. A runner is started again for changes it left unfinished
-at most every ``RETRY_MINUTES``. A skill that hurts is quarantined for the model it hurt; a
-changed skill that no longer hurts gets the quarantine an earlier trial set lifted. Each verdict is
-posted once with ``ctx.post_message`` (a notice beside the conversation, never text in the model's
-context) into the next turn of the session that changed the skill or another session of the same
-sender on the same platform; a change made on the owner's own clients, or by a sender Hermes did
-not record, is posted only on those clients (CLI, TUI, Desktop).
+On by default; ``hermes court auto off`` stops it. The first turn of a profile that runs on the
+defaults gets one notice saying so. The ``on_skill_lifecycle`` hook queues each skill the agent
+creates, patches or edits, keyed by the session that changed it, and each agent-written skill a
+session loads on a model that has no verdict on its current version while another model has one (a
+re-check on that model). When that session ends (``on_session_finalize``), or once it has been
+quiet for ``quiet_minutes`` (checked at the start of any later turn), a detached ``hermes -p
+<profile> court trial --auto`` runs the queue in the background with the same replay profiles as a
+manual trial (sandboxes when Docker answers, else answer-only), appending its output to
+``plugin-data/skill-court/auto.log``. A runner is started again for work it left unfinished at most
+every ``RETRY_MINUTES``. A skill that hurts is quarantined for the model it hurt; a skill that no
+longer hurts gets the quarantine an earlier trial set lifted. Each verdict is posted once with
+``ctx.post_message`` (a notice beside the conversation, never text in the model's context) into the
+next turn of the session that changed or loaded the skill or another session of the same sender on
+the same platform; a session on the owner's own clients, or of a sender Hermes did not record, is
+posted only on those clients (CLI, TUI, Desktop).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home, profile_name_for_home
 from plugins.plugin_storage import plugin_data_dir
 
-from . import mining, scoring, store, trial
+from . import mining, quarantine, scoring, skills, store, trial
 from .appeal import GRANTED
 from .procs import CommandError, child_env, hermes_binary
 
@@ -33,9 +36,11 @@ logger = logging.getLogger(__name__)
 
 # Skill lifecycle actions that change what the agent will be told (``tools/skill_usage.py``).
 CHANGES = frozenset({"created", "patched", "edited"})
+# The lifecycle action of a ``skill_view`` that loaded a skill.
+LOADED = "loaded"
 LOG = "auto.log"
-# A background runner is started again for changes still unfinished (Docker was down, the runner
-# was killed or could not start) at most this often.
+# A background runner is started again for work still unfinished (the runner was killed or could
+# not start) at most this often.
 RETRY_MINUTES = 30
 # The profile owner's own clients (``ctx.session_surface()`` and the hook's ``platform``).
 LOCAL_SURFACES = frozenset({"cli", "tui", "desktop"})
@@ -45,8 +50,33 @@ _LOCAL_SOURCES = frozenset({"local", "cli", "tui", "gui", "desktop", "acp", "one
 
 
 def on_skill_lifecycle(action: str = "", skill_name: str = "", session_id: str = "", **_: Any) -> None:
-    if action in CHANGES and skill_name and store.auto_settings().enabled:
+    if not skill_name or action not in CHANGES | {LOADED} or not store.auto_settings().enabled:
+        return
+    if action in CHANGES:
         store.queue_change(skill_name, session_id or "")
+    elif session_id:
+        _queue_recheck(skill_name, session_id)
+
+
+def _queue_recheck(skill: str, session_id: str) -> None:
+    """``session_id`` just loaded ``skill``: queue a trial on the session's model when the agent wrote
+    the skill, another model has a verdict on it, and this model has none on its current version."""
+    route = quarantine.session_route(session_id)
+    if route is None or not store.tested_on_other_models(skill, route[0]):
+        return
+    found = skills.find(skill)
+    if found is None or not found.agent_authored or store.has_verdict(skill, found.content_hash(), route[0]):
+        return
+    store.queue_recheck(skill, session_id, *route)
+
+
+def first_run_notice(settings: store.AutoSettings) -> str:
+    """What a profile running automatic trials on their defaults is told, once."""
+    return (f"Skill Court is on: it tests each skill the agent writes or changes, and each one used on a model it "
+            "was never tested on, by replaying its tasks with and without the skill (in sandboxes when Docker is "
+            f"available), using up to ${settings.daily_budget_usd:.2f} a day of your provider for replays and "
+            f"{settings.daily_judge_tokens:,} judge tokens a day. `hermes court auto off` stops it; "
+            "`hermes court auto status` shows what it did.")
 
 
 def _launch(settings: store.AutoSettings) -> None:
@@ -79,13 +109,16 @@ def _read_origin(session_id: str) -> tuple[str | None, str | None, str | None]:
 
 
 def notifier(ctx: Any) -> Callable[..., None]:
-    """The ``pre_llm_call`` hook: start trials whose changes went quiet, and post the finished
-    verdicts meant for this turn's session. It returns nothing, so nothing is added to the model's
-    context."""
+    """The ``pre_llm_call`` hook: start trials whose changes went quiet, tell a profile on the default
+    settings once that automatic trials are on, and post the notices meant for this turn's session. It
+    returns nothing, so nothing is added to the model's context."""
     def on_pre_llm_call(session_id: str = "", platform: str = "", sender_id: str = "", **_: Any) -> None:
         settings = store.auto_settings()
         if settings.enabled:
             _launch(settings)
+            if store.first_run_due():
+                # Addressed like a verdict about this session, so it reaches this turn and no other chat.
+                store.queue_first_run_notice(first_run_notice(settings), origin(session_id))
         surface = platform or ctx.session_surface()
         local = surface in LOCAL_SURFACES
         # The turn's chat, read only when a notice waits for this sender on this platform.
@@ -104,8 +137,8 @@ def notifier(ctx: Any) -> Callable[..., None]:
 
 
 def origin(session_id: str) -> store.Origin:
-    """Who a notice about a change made in ``session_id`` is for. A session whose platform or sender
-    Hermes did not record, or that the owner ran on a local client, belongs to the owner."""
+    """Who a notice about ``session_id`` (it changed or loaded a skill) is for. A session whose platform
+    or sender Hermes did not record, or that the owner ran on a local client, belongs to the owner."""
     source, sender, chat_id = _read_origin(session_id)
     if source in _LOCAL_SOURCES:
         return store.Origin(session_id or None, store.LOCAL, None)
@@ -113,8 +146,8 @@ def origin(session_id: str) -> store.Origin:
 
 
 def origins(sessions: list[str]) -> list[store.Origin]:
-    """One origin per audience of the sessions that changed a skill: each sender in each chat, and
-    the owner."""
+    """One origin per audience of the sessions that changed or loaded a skill: each sender in each
+    chat, and the owner."""
     found: dict[tuple[str | None, str, str | None] | None, store.Origin] = {}
     for session in sessions:
         o = origin(session)
@@ -189,15 +222,17 @@ def _still_hidden(skill: str, model: str) -> str:
     return f" It is still hidden from {model} ({reason.rstrip('.')}); `{command}` shows it again."
 
 
-def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None) -> str:
+def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None, recheck: bool = False) -> str:
     """What the user is told about one automatic trial; ``proposed``: the appeal tried after a
-    ``hurts`` verdict, if any."""
+    ``hurts`` verdict, if any; ``recheck``: the trial ran because a session used the skill on a model
+    that had no verdict on it."""
     score, model = outcome.score, outcome.model
-    evidence = trial.describe_sources(outcome.sources)
+    evidence = trial.describe_sources(outcome.sources, outcome.mode)
+    head = f"Skill Court (you used `{skill}` on {model}, which it was never tested on)" if recheck else "Skill Court"
     if score.verdict == scoring.HURTS:
         what = (f"made {model} fail {outcome.failed_with} of {outcome.solved_without} task(s) it solved without it"
                 if outcome.failed_with else f"hurt {model}: {score.reason}")
-        lines = [f"Skill Court: `{skill}` {what} ({evidence})."]
+        lines = [f"{head}: `{skill}` {what} ({evidence})."]
         if outcome.quarantined:
             lines.append(f"Hidden for {model}; `hermes court release {skill} --model {model}` shows it again.")
         if outcome.cause:
@@ -213,15 +248,15 @@ def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None) -> 
     hidden = _still_hidden(skill, model)
     lifted = f" The quarantine an earlier trial set for {model} is lifted." if outcome.released else ""
     if score.verdict == scoring.HELPS:
-        return f"Skill Court: `{skill}` helps {model}: {score.reason} ({evidence}).{lifted}{hidden}"
+        return f"{head}: `{skill}` helps {model}: {score.reason} ({evidence}).{lifted}{hidden}"
     if score.verdict == scoring.NEUTRAL:
         stays = "" if hidden else "; it stays available"
-        return f"Skill Court: `{skill}` made no measurable difference for {model} ({evidence}){stays}.{lifted}{hidden}"
-    text = f"Skill Court: no verdict for `{skill}` on {model} yet: {score.reason}."
+        return f"{head}: `{skill}` made no measurable difference for {model} ({evidence}){stays}.{lifted}{hidden}"
+    text = f"{head}: no verdict for `{skill}` on {model} yet: {score.reason}."
     failed = [j["error"] for j in store.judgments_for(outcome.trial_id) if j["error"]]
     if failed:
-        text += (f" The judge failed on {len(failed)} task(s): {_sentence(failed[0])} "
-                 f"Run `hermes court trial {skill}` once it works again.")
+        retry = f"hermes court trial {skill}" + (f" --model {model}" if recheck else "")
+        text += f" The judge failed on {len(failed)} task(s): {_sentence(failed[0])} Run `{retry}` once it works again."
     else:
         text += f" Add tasks with `hermes court tasks add {skill} --prompt …`."
     return text + hidden
