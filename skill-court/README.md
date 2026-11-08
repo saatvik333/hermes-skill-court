@@ -71,7 +71,8 @@ hermes court trial --all
    is left out, instead of being counted against the skill.
 5. **Rules.** Repeated runs of one task are averaged first, so evidence is counted per task. `hurts`
    when success drops with the skill, or when success is unchanged and the skill costs at least 25%
-   more tokens; `helps` is the reverse; `neutral` when neither shows; `inconclusive` under three
+   more tokens; `helps` is the reverse (success rises, or the same success for at most 1/1.25 of the
+   tokens, i.e. 20% fewer); `neutral` when neither shows; `inconclusive` under three
    tasks with outcomes in both arms. A verdict needs its whole 95% bootstrap interval on one side,
    which with three tasks means every task moved the same way. Each verdict is tied to the skill's
    content hash and the model.

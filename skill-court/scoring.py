@@ -106,6 +106,7 @@ def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0
                   if success_delta else "success was the same")
         if success_delta <= 0 and token_ci[0] > efficiency_margin:
             return result(HURTS, f"{change}, and runs used {_pct(token_change)} tokens with the skill")
-        if success_delta >= 0 and token_ci[1] < -efficiency_margin:
+        # The mirror of "costs 25% more" is "costs 1/1.25 as much", i.e. 20% less, not 25% less.
+        if success_delta >= 0 and token_ci[1] < 1 / (1 + efficiency_margin) - 1:
             return result(HELPS, f"{change}, and runs used {_pct(token_change)} tokens with the skill")
     return result(NEUTRAL, "no measurable difference in success or token use")

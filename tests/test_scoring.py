@@ -47,6 +47,12 @@ def test_same_success_and_much_cheaper_helps():
     assert score([pair(True, True, 400, 1000) for _ in range(3)]).verdict == HELPS
 
 
+def test_the_cheaper_threshold_mirrors_the_costlier_one():
+    # 22% fewer tokens clears 1/1.25 (20% fewer), the mirror of costing 25% more.
+    assert score([pair(True, True, 780, 1000) for _ in range(3)]).verdict == HELPS
+    assert score([pair(True, True, 1220, 1000) for _ in range(3)]).verdict == NEUTRAL
+
+
 def test_noise_is_neutral():
     s = score([pair(True, False), pair(False, True), pair(True, True, 1100, 1000), pair(True, True, 900, 1000)])
     assert s.verdict == NEUTRAL
