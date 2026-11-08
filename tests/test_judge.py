@@ -141,6 +141,14 @@ def test_a_cause_is_one_short_line_without_links_and_the_skill_sent_is_bounded()
     assert len(llm.calls) == 1
 
 
+def test_a_long_cause_ends_on_a_whole_sentence_or_word():
+    two = "It divided the total by 100 though the file holds dollars. " + "x" * 400
+    assert judge.clean_cause(two) == "It divided the total by 100 though the file holds dollars."
+    words = "word " * 100
+    clipped = judge.clean_cause(words)
+    assert clipped.endswith("word…") and len(clipped) <= judge.CAUSE_CHARS + 1
+
+
 def test_an_automatic_trials_judge_stops_at_the_daily_token_cap():
     llm = FakeLlm(lambda _text: "A")  # 10 tokens a call
     capped = Judge(llm, daily_tokens=30)
