@@ -252,10 +252,10 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
 
         # An answer-only run is a few calls, so the extra call that loads the skill is a large share of
         # its tokens and a token verdict would mostly measure that load: only success counts there.
-        skipped = budget.skipped
+        skipped, capped = budget.skipped, judge.capped
         score, observed = adjudicate(tasks, replay, opts, budget, record, say, outcome,
                                      efficiency=arms.mode == SANDBOX)
-        cut = budget.skipped > skipped
+        cut, capped = budget.skipped > skipped, judge.capped and not capped
     model = observed.most_common(1)[0][0] if observed else model
 
     cause = quote = None
@@ -280,7 +280,7 @@ def run(skill: Skill, tasks: list[store.Task], arms: Arms, model: str, opts: Opt
     failed_with, solved_without = _regressions(decided)
     stopped = None
     if score.verdict == scoring.INCONCLUSIVE:
-        if (cut and budget.spent >= budget.limit) or judge.capped:
+        if (cut and budget.spent >= budget.limit) or capped:
             stopped = BUDGET
         elif cut:
             stopped = NO_PRICE

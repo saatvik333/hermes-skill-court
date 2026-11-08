@@ -437,7 +437,7 @@ def test_a_skill_used_on_a_model_with_no_verdict_on_its_version_is_queued_for_th
     # Dedupe: this version has a verdict on Haiku now (an inconclusive one for want of tasks counts
     # too), so another Haiku session queues nothing.
     store.finish_trial(store.start_trial("csv-totals", "v1", HAIKU, auto=True), HAIKU, scoring.INCONCLUSIVE,
-                       json.dumps({"stopped": None}))
+                       json.dumps({"stopped": trial.JUDGE_FAILED}))  # a failing judge's trial counts: the user retries
     assert ("csv-totals", "h-4", HAIKU) not in load("csv-totals", "h-4", HAIKU)
     version["csv-totals"] = "v2"  # until the agent changes it
     assert ("csv-totals", "h-5", HAIKU) in load("csv-totals", "h-5", HAIKU)
@@ -466,7 +466,8 @@ def test_the_runner_tries_changes_then_the_most_used_rechecks_within_the_budget(
     library = {name: SimpleNamespace(name=name, content_hash=lambda: "v1")
                for name in ("csv-totals", "json-format", "team-changelog")}
     monkeypatch.setattr(cli.skills, "library", lambda: library)
-    monkeypatch.setattr(cli, "_auto_tasks", lambda name, *_: [store.Task(1, name, "Do it", None, "mined", None)])
+    monkeypatch.setattr(cli, "_auto_tasks", lambda name, *_: [store.Task(n, name, f"Do it {n}", None, "mined", None)
+                                                              for n in (1, 2, 3)])
 
     def no_scan(_wanted):
         raise AssertionError("ordering re-checks must not scan session history")
@@ -538,3 +539,39 @@ def test_an_unexpected_runner_failure_closes_the_change_and_says_so(runner, monk
     assert (sent["platform"], sent["sender"]) == ("telegram", "42")
     later = datetime.now(timezone.utc) + timedelta(minutes=auto.RETRY_MINUTES + 1)
     assert auto.launch_ready(ON, later) == [] and started == ["default"]  # never retried by itself
+
+
+def test_once_todays_judge_tokens_are_used_up_the_rest_of_the_batch_waits(runner, monkeypatch):
+    library = {name: SimpleNamespace(name=name, content_hash=lambda: "v1") for name in ("csv-totals", "json-format")}
+    monkeypatch.setattr(cli.skills, "library", lambda: library)
+    monkeypatch.setattr(cli, "_auto_tasks", lambda name, *_: [store.Task(1, name, "Do it", None, "mined", None)])
+    ran = []
+
+    def try_skills(_source, _library, selected, *_args, after, **_kwargs):
+        [name] = selected
+        ran.append(name)
+        store.record_judge_call("judge", "m", ON.daily_judge_tokens, None, auto=True)  # the day's judge tokens
+        result = outcome(scoring.NEUTRAL, store.start_trial(name, "v1", MODEL, auto=True))
+        after(name, result)
+        return [(name, result)]
+
+    monkeypatch.setattr(cli, "_try_skills", try_skills)
+    for skill, session in (("csv-totals", "s1"), ("json-format", "s2")):
+        store.queue_change(skill, session)
+        store.end_session(session)
+    auto.launch_ready(ON)
+    assert runner() == 0 and ran == ["csv-totals"]
+    assert {r["skill"]: (r["state"], r["note"]) for r in rows()}["json-format"] == (
+        "pending", "waiting for tomorrow's judge tokens")
+
+
+def test_a_recheck_with_too_few_tasks_records_no_trial_and_waits_for_more_use(runner, monkeypatch):
+    monkeypatch.setattr(cli, "_auto_tasks", lambda name, *_: [store.Task(1, name, "Do it", None, "mined", None)])
+    monkeypatch.setattr(cli, "_try_skills", lambda *_args, **_kwargs: pytest.fail("no trial for one task"))
+    store.queue_recheck("csv-totals", "h-1", HAIKU, "anthropic")
+    store.end_session("h-1")
+    auto.launch_ready(ON)
+    assert runner() == 0
+    [row] = rows()
+    assert row["state"] == "done" and row["note"].startswith("waiting for more tasks: 1 of 3")
+    assert store.latest_trials() == [] and store.notices(10) == []

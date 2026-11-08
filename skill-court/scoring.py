@@ -18,6 +18,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 HELPS, HURTS, NEUTRAL, INCONCLUSIVE = "helps", "hurts", "neutral", "inconclusive"
+# Tasks with outcomes in both arms that a verdict needs.
+MIN_TASKS = 3
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,7 @@ def _pct(x: float) -> str:
     return f"{round(x * 100):+d}%"
 
 
-def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25, efficiency: bool = True,
+def score(pairs: list[Pair], *, min_tasks: int = MIN_TASKS, efficiency_margin: float = 0.25, efficiency: bool = True,
           resamples: int = 2000, seed: int = 0) -> Score:
     rng = random.Random(seed)
     judged = [p for p in pairs if p.with_skill.success is not None and p.without_skill.success is not None]
@@ -115,7 +117,7 @@ def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0
                   else "no measurable difference in success")
 
 
-def settled_early(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25,
+def settled_early(pairs: list[Pair], *, min_tasks: int = MIN_TASKS, efficiency_margin: float = 0.25,
                   efficiency: bool = True) -> bool:
     """Whether the first pairs already show nothing worth more replays: every judged pair ended the
     same way in both arms, on at least ``min_tasks`` tasks, and (with ``efficiency``) the skill's token

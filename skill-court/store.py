@@ -407,12 +407,12 @@ def latest_trials(skills: Iterable[str] | None = None) -> list[dict]:
 
 def has_verdict(skill: str, skill_hash: str, model: str) -> bool:
     """Whether a finished trial judged this version of ``skill`` (its content hash) on ``model``. An
-    inconclusive trial that the budget, the judge's token cap or a failing judge cut short is not one."""
+    inconclusive trial that today's budget or judge tokens cut short is not one; it runs again."""
     with closing(_connect()) as conn:
         return bool(conn.execute(
             "SELECT EXISTS (SELECT 1 FROM trials WHERE skill = ? AND skill_hash = ? AND model = ?"
             " AND finished_at IS NOT NULL"
-            " AND (verdict != 'inconclusive' OR json_extract(summary, '$.stopped') IS NULL))",
+            " AND (verdict != 'inconclusive' OR COALESCE(json_extract(summary, '$.stopped'), '') != 'budget'))",
             (skill, skill_hash, model)).fetchone()[0])
 
 

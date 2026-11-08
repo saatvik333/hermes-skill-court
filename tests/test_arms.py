@@ -194,3 +194,10 @@ def test_an_answer_only_trial_removes_sandboxes_a_killed_run_left_when_docker_an
     monkeypatch.setattr(arms, "sandbox_unavailable", lambda: "no docker or podman command found")
     arms.remove(replay)
     assert removed == []
+
+
+def test_replays_use_hermes_built_in_context_engine(monkeypatch, hermes_toolsets):
+    # A context engine a plugin provides would bring that plugin's tools into the replay.
+    for mode in (arms.SANDBOX, arms.ANSWER_ONLY):
+        settings, _ = build(monkeypatch, mode)
+        assert settings["context.engine"] == "compressor"

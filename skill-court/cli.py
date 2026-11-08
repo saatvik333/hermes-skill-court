@@ -359,7 +359,7 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
         if model and store.has_verdict(name, library[name].content_hash(), model):
             store.finish_queued(name, q.model, None, f"its current version has a verdict on {model}")
             return None
-        if budget.exhausted:
+        if budget.exhausted or judge_spent():
             return []
         tasks = _auto_tasks(name, [] if q.model else q.sessions, opts.tasks)
         if not tasks:
@@ -368,6 +368,13 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
                    else "the session that changed it has no request to replay and it has no other tasks")
             auto.notify(audience[key], None, f"Skill Court: could not test `{name}` automatically: {why}. Add one "
                                              f"with `hermes court tasks add {name} --prompt …`.")
+            return None
+        if q.model and min(len(tasks), opts.tasks) < scoring.MIN_TASKS:
+            # Too few for a verdict: no trial is recorded, so the next session that uses it on this
+            # model (and adds a task) queues it again.
+            store.finish_queued(name, q.model, None, f"waiting for more tasks: {min(len(tasks), opts.tasks)} of "
+                                                     f"{scoring.MIN_TASKS}; tried again when a session uses it on "
+                                                     f"{q.model}")
             return None
         claim_opts = replace(opts, model=q.model, provider=q.provider) if q.model else opts
 
@@ -392,6 +399,9 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
         return _try_skills(source, library, {name: tasks}, claim_opts, budget, judge, disabled, mode=mode,
                            auto_mode=True, keep=False, after=close)
 
+    def judge_spent() -> bool:
+        return judge.capped or store.auto_judge_tokens_today() >= settings.daily_judge_tokens
+
     done: list[tuple[str, trial.Outcome]] = []
     for q in _by_use(claimed):
         tried = attempt(q)
@@ -401,6 +411,8 @@ def _auto_batch(source: str, claimed: list[store.Queued], audience: dict[tuple[s
             done += tried
         elif budget.spent >= budget.limit:
             store.defer_queued(q.skill, q.model, "waiting for tomorrow's budget")
+        elif judge_spent():
+            store.defer_queued(q.skill, q.model, "waiting for tomorrow's judge tokens")
         else:
             # Unpriced runs would make the daily budget meaningless; never retry them unattended.
             store.finish_queued(q.skill, q.model, None, budget.why_stopped())

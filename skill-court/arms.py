@@ -58,6 +58,8 @@ _ISOLATION = (
     ("approvals.single_query_mode", "deny"),
     ("hooks", "{}"),
     ("hooks_auto_accept", "false"),
+    # Hermes' built-in compressor: a context engine from a plugin would bring that plugin's tools.
+    ("context.engine", "compressor"),
 )
 _SANDBOX_SETTINGS = (
     ("terminal.backend", "docker"),
