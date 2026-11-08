@@ -15,8 +15,9 @@ drafts a fix for that line and proves it on the same tasks; the fix is written o
 - Demo skill library and setup: [`demo/`](demo/setup.sh)
 - Tests: `uv run --no-project --with pytest python -m pytest -q`
 - Verdict-quality benchmark: `uv run --no-project python bench/simulate.py` runs the plugin's own
-  trial scheduler and scoring on 3,000 simulated skills with known effects. With the defaults (6
-  tasks, 12 replays per skill) it quarantines 0.96% of harmless skills and catches 47% of harmful
-  ones: 69% of skills that break the tasks they touch, fewer of the subtle ones. `--tasks` buys more.
+  trial scheduler and scoring on 9,000 simulated skills with known effects (three seeds). With the
+  defaults (6 tasks, about 11.5 replays per skill) it quarantines 1.3% of harmless skills and catches
+  44% of harmful ones: 66% of skills that break the tasks they touch, fewer of the subtle ones.
+  `--tasks` buys more.
 
 MIT licensed.

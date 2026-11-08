@@ -64,6 +64,9 @@ hermes court trial --all
    into the next.
 3. **Replays in pairs.** Each task runs in both profiles at the same time as a single-query session
    (`hermes chat -Q --oneshot`), on your model or the one you pass, each run in a fresh Docker sandbox.
+   The first four tasks run first. If every one of them ended the same way with and without the skill
+   and token use stayed within the efficiency margin, the rest are not run: on the
+   [benchmark](../README.md) this never changed a verdict and saved about 5% of replays.
 4. **Scores each pair.** A task's check runs inside each run's sandbox afterwards (exit 0 = pass). A
    task without a check goes to the [judge](#the-judge): it compares the two runs' final answers and
    the files they left, without being told which run had the skill. Token use is compared pair by
