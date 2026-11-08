@@ -197,19 +197,19 @@ def notice(skill: str, outcome: trial.Outcome, proposed: dict | None = None) -> 
     if score.verdict == scoring.HURTS:
         what = (f"made {model} fail {outcome.failed_with} of {outcome.solved_without} task(s) it solved without it"
                 if outcome.failed_with else f"hurt {model}: {score.reason}")
-        text = f"Skill Court: `{skill}` {what} ({evidence})"
-        text += "; hidden for that model." if outcome.quarantined else "."
-        if outcome.cause:
-            text += f" Cause: {_sentence(outcome.cause)}"
-            text += f" Skill line: \"{outcome.quote}\"." if outcome.quote else ""
+        lines = [f"Skill Court: `{skill}` {what} ({evidence})."]
         if outcome.quarantined:
-            text += f" `hermes court release {skill} --model {model}` undoes it."
+            lines.append(f"Hidden for {model}; `hermes court release {skill} --model {model}` shows it again.")
+        if outcome.cause:
+            lines.append(f"Why: {_sentence(outcome.cause)}")
+            if outcome.quote:
+                lines.append(f"Skill line: \"{outcome.quote}\"")
         if proposed is not None and proposed["verdict"] == GRANTED:
-            text += (f" A fix was proven: {_sentence(proposed['reason'])} See it with `hermes court appeal show {skill} "
-                     f"--model {model}`, apply it with `hermes court appeal apply {skill} --model {model}`.")
+            lines.append(f"Fix proven: {_sentence(proposed['reason'])} See it with `hermes court appeal show {skill} "
+                         f"--model {model}`, apply it with `hermes court appeal apply {skill} --model {model}`.")
         elif proposed is not None:
-            text += f" A drafted fix did not pass its trial: {_sentence(proposed['reason'])}"
-        return text
+            lines.append(f"A drafted fix did not pass its trial: {_sentence(proposed['reason'])}")
+        return "\n".join(lines)
     hidden = _still_hidden(skill, model)
     lifted = f" The quarantine an earlier trial set for {model} is lifted." if outcome.released else ""
     if score.verdict == scoring.HELPS:

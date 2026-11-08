@@ -167,22 +167,23 @@ Off until you turn it on. Then:
    `SessionDB` records each session's platform, sender and chat), so a verdict about a direct chat
    never lands in a group. A change made in your own CLI, TUI or Desktop, or in a session whose
    sender Hermes did not record, is posted only in the CLI, TUI or Desktop, never in someone
-   else's chat. This one appeared in the CLI after the agent saved a skill from one user remark, in
-   a session with three requests it had answered correctly (its release command now also names the
-   model):
+   else's chat. This one appeared in the CLI after Hermes' own review saved a skill from one user
+   remark ("our sales exports are in cents") in a session with four totals it had answered in plain
+   numbers, the first three accepted by the user:
 
    ```
-   ☤ Hermes
-     Skill Court: `shop-csv-totals` made claude-sonnet-5-5 fail 3 of 3 task(s) it solved without it
-     (3 judged); hidden for that model. Cause: The skill asserts that the amount column is always in
-     cents, based on an earlier Q2 export, and the agent applied it to today's export without
-     checking. It divided the sum 60 by 100 and answered 0.60 instead of 60, even though these
-     amounts (12, 30, 18) look like whole dollars. Skill line: "- The amount column is in cents
-     (confirmed when the Q2 export was reconciled). Sum the amounts, divide by 100, and report
-     dollars with two decimals (e.g. 12345 -> 123.45).". `hermes court release shop-csv-totals
-     --model claude-sonnet-5-5` undoes it.
-   295
+   Skill Court: `sales-export-totals` made claude-sonnet-5-5 fail 5 of 5 task(s) it solved without it (5 judged).
+   Hidden for claude-sonnet-5-5; `hermes court release sales-export-totals --model claude-sonnet-5-5` shows it again.
+   Why: The skill made the agent add a cents-to-dollars conversion and the arithmetic line to a request for
+   just the number, asserting a unit the export never stated instead of giving the bare total.
+   Skill line: "- The user asks "just the number": give the bare total, but state the unit so it is not
+   misread, e.g. `3748 cents ($37.48)`. No other commentary."
+   Fix proven: the draft no longer hurts (neutral) and succeeded on 80% of tasks, up from 0% with the
+   original. See it with `hermes court appeal show sales-export-totals --model claude-sonnet-5-5`, apply
+   it with `hermes court appeal apply sales-export-totals --model claude-sonnet-5-5`.
    ```
+
+   (The run printed these as one paragraph; the line breaks shown are the current format.)
 
 **How it spends money.** Every automatic trial is real replays on your provider, plus judge calls.
 Replays stop for the day once the provider-reported spend of today's automatic trials reaches the
