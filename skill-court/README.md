@@ -43,6 +43,12 @@ quarantined for Sonnet. Haiku followed it only sometimes (one or two wrong total
 two of its three trials), which is not consistent enough for a verdict at three tasks, so Haiku
 still sees it. The demo is in `demo/` (see [Try it](#try-it)).
 
+Hermes' own skills are often careful. While recording the demo, a user corrected one file ("that Q2
+file is in cents", or similar wording) in six chats. Each time, Claude Sonnet 5.5 and Haiku 5.5 saved
+a skill that kept the rule to that file. The one put on trial came out neutral (80% → 80%), and the
+court left it alone. Only a general remark from the user ("our sales exports are in cents") produced
+a categorical rule, and that one flipped totals the user had accepted earlier in the same session.
+
 ## How a trial works
 
 ```
