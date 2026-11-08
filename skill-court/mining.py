@@ -1,7 +1,9 @@
 """Find replayable tasks in the profile's session history.
 
 A task is the user message that led the agent to call ``skill_view`` on a skill: the request the
-skill was loaded to serve. History is read through the public, read-only ``SessionDB``.
+skill was loaded to serve. For an automatic trial, the tasks also include the requests of the
+session in which the agent wrote the skill, and that session's platform and sender decide who is
+told the verdict. History is read through the public, read-only ``SessionDB``.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ class MinedTask:
     session_id: str
 
 
-def _text(content: Any) -> str:
+def text_of(content: Any) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
@@ -31,17 +33,23 @@ def _text(content: Any) -> str:
     return ""
 
 
-def _viewed_skills(tool_calls: Any) -> Iterable[str]:
+def _calls(tool_calls: Any) -> Iterable[tuple[str, Any]]:
+    """``(tool name, decoded arguments)`` per well-formed call."""
     for call in tool_calls if isinstance(tool_calls, list) else ():
         function = call.get("function") if isinstance(call, dict) else None
-        if not isinstance(function, dict) or function.get("name") != "skill_view":
+        if not isinstance(function, dict) or not isinstance(function.get("name"), str):
             continue
         arguments = function.get("arguments")
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
         except ValueError:
             continue
-        if isinstance(args, dict) and isinstance(args.get("name"), str) and not args.get("file_path"):
+        yield function["name"], args
+
+
+def viewed_skills(tool_calls: Any) -> Iterable[str]:
+    for name, args in _calls(tool_calls):
+        if name == "skill_view" and isinstance(args, dict) and isinstance(args.get("name"), str) and not args.get("file_path"):
             yield skill_key(args["name"])
 
 
@@ -52,12 +60,62 @@ def tasks_in_session(messages: list[dict], wanted: frozenset[str] | None) -> dic
     for message in messages:
         role = message.get("role")
         if role == "user":
-            last_user = _text(message.get("content"))
+            last_user = text_of(message.get("content"))
         elif role == "assistant":
-            for skill in _viewed_skills(message.get("tool_calls")):
+            for skill in viewed_skills(message.get("tool_calls")):
                 if (wanted is None or skill in wanted) and skill not in found and len(last_user) >= MIN_PROMPT_CHARS:
                     found[skill] = last_user
     return found
+
+
+def requests_in_session(messages: list[dict]) -> list[str]:
+    """The distinct user requests of one session, in order, except the turns in which the agent wrote
+    a skill (``skill_manage``): asking it to save a skill is not a task the skill serves."""
+    turns: list[tuple[str, bool]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "user":
+            turns.append((text_of(message.get("content")), False))
+        elif role == "assistant" and turns and any(name == "skill_manage" for name, _ in _calls(message.get("tool_calls"))):
+            turns[-1] = (turns[-1][0], True)
+    requests: list[str] = []
+    for prompt, wrote_skill in turns:
+        if not wrote_skill and len(prompt) >= MIN_PROMPT_CHARS and prompt not in requests:
+            requests.append(prompt)
+    return requests
+
+
+def session_requests(session_id: str) -> list[str]:
+    """``requests_in_session`` for one session of the active profile."""
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    if not session_id or not (get_hermes_home() / "state.db").exists():
+        return []
+    db = SessionDB(read_only=True)
+    try:
+        return requests_in_session(db.get_messages(session_id))
+    finally:
+        db.close()
+
+
+def session_origin(session_id: str) -> tuple[str | None, str | None, str | None]:
+    """``(source, user_id, chat_id)`` Hermes stored for one session of the active profile: the
+    platform or client it ran on, its sender and its chat. Nones when the session is not stored or a
+    field is empty."""
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    if not session_id or not (get_hermes_home() / "state.db").exists():
+        return None, None, None
+    db = SessionDB(read_only=True)
+    try:
+        row = db.get_session(session_id)
+    finally:
+        db.close()
+    if not row:
+        return None, None, None
+    return row.get("source") or None, row.get("user_id") or None, row.get("chat_id") or None
 
 
 def mine(wanted: Iterable[str] | None, per_skill: int) -> dict[str, list[MinedTask]]:

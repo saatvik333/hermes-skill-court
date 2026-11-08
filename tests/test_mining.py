@@ -1,6 +1,6 @@
 import json
 
-from skill_court.mining import tasks_in_session
+from skill_court.mining import requests_in_session, tasks_in_session
 
 
 def view(name, **extra):
@@ -53,3 +53,24 @@ def test_malformed_tool_calls_are_skipped():
         {"role": "assistant", "content": "", "tool_calls": None},
     ]
     assert tasks_in_session(messages, None) == {}
+
+
+def manage(action="create"):
+    return {"function": {"name": "skill_manage", "arguments": json.dumps({"action": action, "name": "csv-totals"})}}
+
+
+def test_session_requests_leave_out_the_turn_that_wrote_the_skill():
+    messages = [
+        {"role": "user", "content": "Total this week's sales export: 120, 45, 300"},
+        {"role": "assistant", "content": "465"},
+        {"role": "user", "content": "ok"},
+        {"role": "user", "content": "Total the March export: 250, 90, 35"},
+        {"role": "assistant", "content": "375"},
+        {"role": "user", "content": "Save what you learned about our exports as a skill"},
+        assistant(manage()),
+        {"role": "tool", "tool_name": "skill_manage", "content": "{}"},
+        {"role": "assistant", "content": "Saved."},
+        {"role": "user", "content": "Total this week's sales export: 120, 45, 300"},
+    ]
+    assert requests_in_session(messages) == ["Total this week's sales export: 120, 45, 300",
+                                             "Total the March export: 250, 90, 35"]

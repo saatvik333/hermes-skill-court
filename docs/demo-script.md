@@ -1,17 +1,31 @@
-# Demo video script (under 90 seconds)
+# Demo video (about 75 seconds)
 
-Record on a lab profile (`courtlab`) after `demo/setup.sh courtlab`. The figures below are from the
-runs on 8 Nov 2026 (Hermes 0.23.0); a fresh recording can differ by a task or two, so read the
-numbers off your own screen.
+Everything after the title card is real footage from a scratch profile on Hermes 0.23.0 with Claude Sonnet 5.5. Terminal sessions were recorded with asciinema and rendered frame by frame. The Desktop page was captured from the live Webapp. Sped-up stretches carry a "×N" badge. Verdicts and numbers differ from run to run, so read them off your own screen.
 
-| Time | Screen | Caption / voice-over |
-|---|---|---|
-| 0–8 s | `hermes -p courtlab skills list`, the four demo skills highlighted | "Hermes writes its own skills. Nothing checks whether they help." |
-| 8–30 s | `hermes -p courtlab court trial --all --tasks 3 --apply`, sped up; per-run lines scroll, with and without each skill, each run in its own Docker sandbox | "Skill Court runs every task twice, with the skill and without it, and checks the result inside the sandbox." |
-| 30–45 s | The final table: `team-changelog` helps (0% → 100%), `sales-csv-totals` hurts (100% → 0%, quarantined), the other two neutral | "The team convention helps. The rule 'amounts are in cents', learned from one export, turns every total wrong, so it is quarantined." |
-| 45–58 s | `hermes -p courtlab chat -Q --oneshot -q "Without calling any tools, list the skills in your <available_skills> index under the demo category"`: `sales-csv-totals` is gone; then `ls ~/.hermes/profiles/courtlab/skills/demo` still shows it | "The next session no longer sees it. The file is untouched." |
-| 58–75 s | The same trial with `--model claude-haiku-5-5 --provider anthropic`, then the Desktop **Skill Court** page with both models side by side | "Verdicts are per model. On Haiku the same skill was not consistently harmful, so Haiku still sees it." |
-| 75–88 s | Desktop: press **Release** on `sales-csv-totals`, then `hermes -p courtlab court list` | "One click brings it back. Skill Court: evidence instead of self-assessment." |
+| Screen | Caption |
+|---|---|
+| Title card | Skill Court: every lesson your agent writes goes on trial. |
+| Chat: three sales exports totalled; the user accepts each | Hermes totals three sales exports. The user accepts each one. |
+| Chat: the Q2 export, then the user's remark | Then one remark: "our sales exports are in cents". |
+| Chat: "Self-improvement review: Skill 'sales-export-totals' created" | Hermes' own review saves it as a skill. |
+| `auto.log`: paired replays in Docker sandboxes | Skill Court replays the session with and without the skill, in sandboxes. |
+| `auto.log`: judged pairs and the HURTS verdict | With the skill, the totals the user accepted come out wrong. |
+| `auto.log`: the drafted fix on trial | Then it drafts a fix and puts the fix on trial. |
+| Next chat turn: the Skill Court notice (verdict, why, skill line, proven fix) | Next turn: hidden for this model, with the line that caused it. |
+| `hermes court appeal show`: the diff | The fix keeps a bare-number answer bare, and passes the same tasks. |
+| Desktop Skill Court page: the verdict, cause and proven fix | In Hermes Desktop: the verdict, the cause and a proven fix. |
+| Desktop: the Apply fix dialog | Apply fix asks first and names the file it overwrites. |
+| Desktop: after apply | Applied. Nothing quarantined; undo is one command. |
+| `hermes court list` / `report` | Every step stays on the record, with undo. |
+| End card: the install command and the repo | — |
 
-Post on X tagging @NousResearch, with the catalog PR link and https://github.com/saatvik333/hermes-skill-court,
-then submit both links in the hackathon form.
+## Reproducing it
+
+1. Clone a profile and turn on automatic trials: `hermes court auto on`.
+2. In a chat:
+   - ask for the totals of three small sales CSVs ("Just the number"), then a Q2 export;
+   - then say "No, our sales exports are in cents, not dollars."
+3. With `skills.creation_nudge_interval` at 5, Hermes' review saves a skill after that turn.
+4. The trial starts when the session ends; its verdict appears at the next turn.
+
+When the correction named only that one file ("that Q2 file is in cents"), Claude Sonnet 5.5 and Haiku 5.5 kept the rule to that file in all six rehearsals. The one we put on trial came out neutral.

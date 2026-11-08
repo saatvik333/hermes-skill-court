@@ -1,4 +1,15 @@
-from skill_court.runner import RunResult, apply_session_row, session_containers
+import base64
+import io
+import os
+import shutil
+import subprocess
+import tarfile
+
+import pytest
+
+from skill_court import runner
+from skill_court.procs import CommandError, TimedOut
+from skill_court.runner import RunResult, apply_session_row, session_containers, workspace_text
 
 SESSION = "local-" + "ab12" * 16
 
@@ -50,3 +61,109 @@ def test_ambiguous_labels_are_all_reported():
     profile = "p"
     label = f"profile_{profile}_{SESSION}"[:63]
     assert session_containers(profile, SESSION, [("a", label), ("b", label)]) == ["a", "b"]
+
+
+def archive(files):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, data in files:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def test_snapshot_shows_text_files_and_names_binary_ones():
+    text = workspace_text(archive([("workspace/total.txt", b"465\n"), ("workspace/logo.png", b"\x89PNG\x00\x01"),
+                                   ("workspace/latin1.txt", "café".encode("latin-1"))]))
+    assert text.splitlines() == [
+        "--- /workspace/total.txt (4 bytes)", "465",
+        "--- /workspace/logo.png (6 bytes), binary, not shown",
+        "--- /workspace/latin1.txt (4 bytes), binary, not shown",
+    ]
+
+
+def test_snapshot_stays_within_its_limit_and_says_what_it_left_out():
+    files = [(f"workspace/f{i}.txt", b"x" * 300) for i in range(10)]
+    text = workspace_text(archive(files), limit=1_000)
+    assert len(text) <= 1_000 + 40
+    assert text.endswith("more file(s) not shown]")
+    assert text.count("--- /workspace/") == 3  # two whole files and the start of the third
+
+
+def test_snapshot_of_nothing_or_garbage():
+    assert workspace_text(archive([])) == "(no files)"
+    # An archive that cannot be read is a failed snapshot, never text the judge would weigh.
+    with pytest.raises(CommandError, match="could not be read"):
+        workspace_text("not base64 at all!")
+    with pytest.raises(CommandError, match="could not be read"):
+        workspace_text(archive([("workspace/total.txt", b"465\n" * 400)])[:400])
+
+
+@pytest.mark.parametrize("tar_status, snapshot_status", [(1, 0), (2, 2)])
+def test_tars_own_exit_status_decides_the_snapshot(tmp_path, tar_status, snapshot_status):
+    # A tar that writes its archive, then exits like GNU tar: 1 when a file changed as it was read
+    # (the archive is still good), 2 for a fatal error.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    tar = bin_dir / "tar"
+    tar.write_text(f'#!/bin/sh\n"{shutil.which("tar")}" "$@"\necho "tar: /workspace/total.txt: file changed" >&2\n'
+                   f"exit {tar_status}\n")
+    tar.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    proc = subprocess.run(["sh", "-c", runner.snapshot_script(5)], capture_output=True, text=True, env=env,
+                          cwd=tmp_path)
+    assert proc.returncode == snapshot_status
+    if snapshot_status == 0:
+        workspace_text(proc.stdout)  # the archive tar wrote is read
+    else:
+        assert "file changed" in proc.stderr and proc.stdout == ""
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    """A replay whose run answers and leaves one sandbox; ``snapshot`` decides how reading its files
+    goes. Records every container command."""
+    commands = []
+    snapshot = {"returncode": 0, "stdout": archive([])}
+
+    def run(argv, *, timeout, check=True, **_):
+        if argv[0] == "hermes":
+            return subprocess.CompletedProcess(argv, 0, "465\n", f"session_id: {SESSION}\n")
+        commands.append(argv[1:3])
+        if argv[1] == "exec":
+            if snapshot.get("timeout"):
+                raise TimedOut(f"`docker exec …` timed out after {timeout:.0f}s", "", "")
+            proc = subprocess.CompletedProcess(argv, snapshot["returncode"], snapshot["stdout"], "Error: No such container")
+            if check and proc.returncode != 0:  # what procs.run does
+                raise CommandError(f"`docker exec …` exited {proc.returncode}: Error: No such container")
+            return proc
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(runner, "hermes_binary", lambda: "hermes")
+    monkeypatch.setattr(runner, "container_binary", lambda: "docker")
+    monkeypatch.setattr(runner, "read_session", lambda *_: True)
+    monkeypatch.setattr(runner, "_labelled_containers", lambda _profile: [("c1", SESSION[:63])])
+    return snapshot, commands
+
+
+def replay(tmp_path):
+    return runner.replay("court-1a2b3c4d-with", "Total the sales", None, workdir=tmp_path, timeout=60)
+
+
+def test_a_sandbox_that_left_no_files_is_judged_on_its_answer(sandbox, tmp_path):
+    result = replay(tmp_path)
+    assert (result.completed, result.workspace, result.error) == (True, "(no files)", None)
+    assert sandbox[1] == [["exec", "c1"], ["rm", "-f"]]
+
+
+@pytest.mark.parametrize("failure", [{"returncode": 1, "stdout": ""}, {"timeout": True},
+                                     {"returncode": 0, "stdout": "not base64 at all!"}])
+def test_a_sandbox_whose_files_could_not_be_read_gives_no_outcome_and_is_still_removed(sandbox, tmp_path, failure):
+    snapshot, commands = sandbox
+    snapshot.update(failure)
+    result = replay(tmp_path)
+    assert result.completed is None and result.workspace is None
+    assert "could not be read" in result.error
+    assert commands == [["exec", "c1"], ["rm", "-f"]]

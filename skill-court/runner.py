@@ -4,12 +4,20 @@ Replays run as single-query sessions (``hermes chat -Q --oneshot``): approval pr
 ``approvals.single_query_mode`` (deny in replay profiles) instead of being auto-approved.
 ``--run-budget`` asks the agent to wrap up as the time limit nears; past it, the client gets
 SIGTERM, which interrupts the turn, and SIGKILL if it does not stop.
+
+A task without a check keeps the run's final answer and a bounded snapshot of the files it left
+in its sandbox, taken before the sandbox is removed, for the judge to compare.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 import json
+import math
 import re
+import tarfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -22,6 +30,13 @@ CHECK_TIMEOUT = 120
 # Seconds a timed-out replay gets after SIGTERM to interrupt its turn before SIGKILL.
 STOP_GRACE = 30
 _SESSION_LINE = re.compile(r"^session_id:\s*(\S+)\s*$", re.MULTILINE)
+# The sandbox snapshot: files under these directories that the run created or changed (status
+# change time inside the run), outside hidden directories, at most SNAPSHOT_FILES files of
+# SNAPSHOT_FILE_KB each, rendered to at most SNAPSHOT_CHARS characters.
+SNAPSHOT_ROOTS = ("/workspace", "/root")
+SNAPSHOT_FILES = 40
+SNAPSHOT_FILE_KB = 64
+SNAPSHOT_CHARS = 16_000
 
 
 @dataclass
@@ -36,12 +51,74 @@ class RunResult:
     cost_usd: float | None = None
     seconds: float | None = None
     error: str | None = None
+    answer: str | None = None  # the final answer the run printed
+    workspace: str | None = None  # sandbox snapshot, for tasks without a check
 
     def as_row(self) -> dict:
         row = asdict(self)
         for key in ("completed", "passed"):
             row[key] = None if row[key] is None else int(row[key])
         return row
+
+
+def workspace_text(archive_b64: str, limit: int = SNAPSHOT_CHARS) -> str:
+    """Render a base64 tar of sandbox files for the judge: text files in full up to ``limit``
+    characters overall; binary and non-UTF-8 files by name and size only. Raises ``CommandError``
+    for an archive that cannot be read, which the judge must never take for a run without files."""
+    parts: list[str] = []
+    used = shown = 0
+    try:
+        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(archive_b64))) as archive:
+            members = [m for m in archive.getmembers() if m.isfile()]
+            for member in members:
+                handle = archive.extractfile(member)
+                raw = handle.read() if handle is not None else b""
+                header = f"--- /{member.name.lstrip('/')} ({member.size} bytes)"
+                try:
+                    text = raw.decode("utf-8")
+                    binary = "\0" in text
+                except UnicodeDecodeError:
+                    binary = True
+                block = f"{header}, binary, not shown" if binary else f"{header}\n{text.rstrip()}"
+                room = limit - used
+                if len(block) > room:
+                    if not binary and room > len(header) + 1:
+                        parts.append(block[:room] + "…")
+                        shown += 1
+                    break
+                parts.append(block)
+                used += len(block) + 1
+                shown += 1
+    except (binascii.Error, tarfile.TarError, OSError, ValueError) as exc:
+        raise CommandError(f"the sandbox's files could not be read: {exc}") from None
+    if shown < len(members):
+        parts.append(f"[{len(members) - shown} more file(s) not shown]")
+    return "\n".join(parts) if parts else "(no files)"
+
+
+def snapshot_script(minutes: int) -> str:
+    """The shell script that prints, base64-encoded, a tar of the files the run created or changed.
+    The archive goes to a temporary file first, so tar's own exit status is the script's. GNU tar
+    exits 1 when a file changed as it was read, with the archive still written; only 2 and above
+    fail the snapshot."""
+    roots = " ".join(SNAPSHOT_ROOTS)
+    return ("for tool in tar base64 mktemp; do\n"
+            "  command -v \"$tool\" >/dev/null || { echo \"$tool is missing\" >&2; exit 127; }\n"
+            "done\n"
+            "archive=$(mktemp) || exit 1\n"
+            f"find {roots} -xdev -type f -cmin -{minutes} ! -path '*/.*' -size -{SNAPSHOT_FILE_KB}k 2>/dev/null"
+            f" | head -n {SNAPSHOT_FILES} | tar -cf \"$archive\" -T -\n"
+            "status=$?\n"
+            "if [ \"$status\" -le 1 ]; then base64 \"$archive\"; status=$?; fi\n"
+            "rm -f \"$archive\"\n"
+            "exit $status\n")
+
+
+def _snapshot(container: str, minutes: int) -> str:
+    """The run's files for the judge. Raises ``CommandError`` (``TimedOut`` past the check timeout)
+    when they could not be read, so a failed read is never taken for a run that left no files."""
+    proc = run([container_binary(), "exec", container, "sh", "-c", snapshot_script(minutes)], timeout=CHECK_TIMEOUT)
+    return workspace_text(proc.stdout) if proc.stdout.strip() else "(no files)"
 
 
 def session_containers(profile: str, session_id: str, labelled: list[tuple[str, str]]) -> list[str]:
@@ -85,6 +162,20 @@ def read_session(profile: str, session_id: str, result: RunResult) -> bool:
     if not row:
         return False
     return apply_session_row(row, result)
+
+
+def session_messages(profile: str, session_id: str) -> list[dict]:
+    """A replay's transcript from its profile's session store (read before the profile is deleted)."""
+    from hermes_state import SessionDB
+
+    db_path = profile_home(profile) / "state.db"
+    if not db_path.exists():
+        return []
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        return db.get_messages(session_id)
+    finally:
+        db.close()
 
 
 def apply_session_row(row: dict, result: RunResult) -> bool:
@@ -132,6 +223,8 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     finally:
         query.unlink(missing_ok=True)
     output = f"{stdout}\n{stderr}"
+    # Single-query mode prints only the final answer on stdout.
+    result.answer = stdout.strip() or None
     found = _SESSION_LINE.search(stderr)
     result.session_id = found.group(1) if found else None
     result.seconds = round(time.monotonic() - started, 1)
@@ -142,6 +235,7 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
     responded = read_session(profile, result.session_id, result)
     # The gateway may not have flushed token counters yet; a completed turn with an answer did respond.
     responded = responded or (result.exit_code == 0 and bool(stdout.strip()))
+    container = None
     try:
         matches = session_containers(profile, result.session_id, _labelled_containers(profile))
         container = matches[0] if len(matches) == 1 else None
@@ -165,8 +259,23 @@ def replay(profile: str, prompt: str, check_cmd: str | None, *, workdir: Path, t
                     # The agent never opened a sandbox, so it produced nothing the check could find.
                     result.passed = False
                     result.error = "no sandbox was created, so the check found nothing to verify"
-        if container is not None:
-            run([container_binary(), "rm", "-f", container], timeout=60, check=False)
+            elif container is not None:
+                try:
+                    result.workspace = _snapshot(container, math.ceil((time.monotonic() - started) / 60) + 1)
+                except CommandError as exc:
+                    # The judge would weigh this run's missing files against the other run's files.
+                    result.completed = None
+                    result.error = f"its sandbox's files could not be read, so it has no outcome: {exc}"
+            elif matches:
+                result.workspace = f"({len(matches)} sandboxes carry this session's label; none was read)"
+            else:
+                result.workspace = "(the run opened no sandbox, so it left no files)"
     except CommandError as exc:
         result.error = str(exc)
+    finally:
+        if container is not None:
+            try:
+                run([container_binary(), "rm", "-f", container], timeout=60, check=False)
+            except CommandError as exc:  # the trial's cleanup removes the profile's sandboxes again
+                result.error = result.error or f"its sandbox was not removed: {exc}"
     return result

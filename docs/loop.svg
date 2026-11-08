@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420">
+  <rect width="1200" height="420" fill="#0f1115"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6c7380"/>
+    </marker>
+  </defs>
+  <g font-family="JetBrainsMono Nerd Font Mono, JetBrains Mono, monospace">
+    <text x="60" y="64" fill="#f2f3f5" font-size="30" font-weight="700">Every lesson the agent writes goes on trial</text>
+
+    <g font-size="19">
+      <rect x="60" y="120" width="200" height="110" rx="8" fill="#1a1d23" stroke="#2a2f38" stroke-width="2"/>
+      <text x="80" y="160" fill="#e6e8eb">Agent writes</text>
+      <text x="80" y="188" fill="#e6e8eb">or patches</text>
+      <text x="80" y="216" fill="#e6e8eb">a skill</text>
+
+      <rect x="330" y="120" width="230" height="110" rx="8" fill="#1a1d23" stroke="#2a2f38" stroke-width="2"/>
+      <text x="350" y="160" fill="#e6e8eb">Same tasks,</text>
+      <text x="350" y="188" fill="#e6e8eb">with and without</text>
+      <text x="350" y="216" fill="#a9b0bc" font-size="16">two Docker sandboxes</text>
+
+      <rect x="630" y="120" width="230" height="110" rx="8" fill="#1a1d23" stroke="#2a2f38" stroke-width="2"/>
+      <text x="650" y="160" fill="#e6e8eb">Check or blind</text>
+      <text x="650" y="188" fill="#e6e8eb">judge scores</text>
+      <text x="650" y="216" fill="#a9b0bc" font-size="16">each pair</text>
+
+      <rect x="930" y="120" width="210" height="110" rx="8" fill="#1a1d23" stroke="#2a2f38" stroke-width="2"/>
+      <text x="950" y="160" fill="#e6e8eb">Verdict</text>
+      <text x="950" y="188" fill="#e6e8eb">per model</text>
+      <text x="950" y="216" fill="#a9b0bc" font-size="16">95% interval</text>
+
+      <line x1="262" y1="175" x2="326" y2="175" stroke="#6c7380" stroke-width="2" marker-end="url(#arrow)"/>
+      <line x1="562" y1="175" x2="626" y2="175" stroke="#6c7380" stroke-width="2" marker-end="url(#arrow)"/>
+      <line x1="862" y1="175" x2="926" y2="175" stroke="#6c7380" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <rect x="930" y="290" width="96" height="34" rx="4" fill="#123d2a"/>
+      <text x="944" y="314" fill="#5fd39a">helps</text>
+      <text x="1036" y="314" fill="#a9b0bc" font-size="16">kept</text>
+      <rect x="930" y="340" width="96" height="34" rx="4" fill="#4a1d1f"/>
+      <text x="944" y="364" fill="#ff8a8a">hurts</text>
+      <text x="1036" y="364" fill="#a9b0bc" font-size="16">hidden for</text>
+      <text x="1036" y="384" fill="#a9b0bc" font-size="16">that model</text>
+      <line x1="1035" y1="232" x2="1035" y2="282" stroke="#6c7380" stroke-width="2" marker-end="url(#arrow)"/>
+
+      <text x="60" y="314" fill="#a9b0bc" font-size="17">The cause, quoted from the skill line that misled the model,</text>
+      <text x="60" y="340" fill="#a9b0bc" font-size="17">is posted back to your chat. An appeal drafts a fix, proves it</text>
+      <text x="60" y="366" fill="#a9b0bc" font-size="17">on trial, and writes it only on <tspan fill="#e6e8eb">hermes court appeal apply</tspan>.</text>
+    </g>
+  </g>
+</svg>

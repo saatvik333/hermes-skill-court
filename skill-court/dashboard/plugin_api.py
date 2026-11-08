@@ -1,4 +1,4 @@
-"""Desktop backend: verdicts and quarantine, under /api/plugins/skill-court/."""
+"""Desktop backend: verdicts, quarantine and appeals, under /api/plugins/skill-court/."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from pathlib import Path
 from types import ModuleType
 
 from fastapi import APIRouter, HTTPException
+from hermes_constants import get_hermes_home, profile_name_for_home
 from pydantic import BaseModel
 
 
 def _sibling(name: str) -> ModuleType:
     """Load one of the plugin's own modules from the folder above. Hermes imports this file on its
-    own, outside the plugin package; ``store`` and ``skills`` have no relative imports.
+    own, outside the plugin package; ``store``, ``skills`` and ``procs`` have no relative imports.
 
     The module is registered under its own ``skill_court_dashboard_*`` name before it runs, as the
     standard importlib recipe does: its dataclasses look their module up in ``sys.modules``.
@@ -39,6 +40,7 @@ def _sibling(name: str) -> ModuleType:
 
 store = _sibling("store")
 skills = _sibling("skills")
+procs = _sibling("procs")
 
 router = APIRouter()
 
@@ -49,9 +51,28 @@ class QuarantineBody(BaseModel):
     reason: str = "quarantined from Hermes Desktop"
 
 
-class ReleaseBody(BaseModel):
+class SkillModelBody(BaseModel):
     skill: str
     model: str
+
+
+class ApplyBody(SkillModelBody):
+    appeal_id: int  # the appeal the page's dialog showed; nothing else is applied
+
+
+def _appeals(library: dict) -> list[dict]:
+    """The newest appeal per skill and model: its draft's diff, verdict, and whether it still
+    applies to the skill as it is (``stale`` once the skill changed after the draft)."""
+    rows = []
+    for a in store.latest_appeals():
+        current = library.get(a["skill"])
+        rows.append({
+            "id": a["id"], "skill": a["skill"], "model": a["model"], "verdict": a["verdict"], "reason": a["reason"],
+            "diff": a["diff"], "created_at": a["created_at"], "applied": a["applied_at"] is not None,
+            "stale": current is None or current.content_hash() not in (a["base_hash"], a["draft_hash"]),
+            "path": None if current is None else str(current.path / "SKILL.md"),
+        })
+    return rows
 
 
 def _verdicts() -> dict:
@@ -61,17 +82,25 @@ def _verdicts() -> dict:
     for trial in store.latest_trials():
         current = library.get(trial["skill"])
         rows.append({
+            # success rates, intervals, token change and ``sources`` ({check, judge}: pairs scored each way)
             **json.loads(trial["summary"] or "{}"),
             "skill": trial["skill"],
             "model": trial["model"],
             "verdict": trial["verdict"],
             "judged_at": trial["finished_at"],
             "trial_id": trial["id"],
+            "auto": bool(trial["auto"]),
+            "cause": trial["cause"],
+            "cause_quote": trial["cause_quote"],
             "skill_changed": current is None or current.content_hash() != trial["skill_hash"],
             "quarantined": (trial["skill"], trial["model"]) in hidden or (trial["skill"], store.ANY_MODEL) in hidden,
         })
     quarantine = [{"skill": s, "model": m, "reason": r, "since": c} for s, m, r, c in store.quarantine_entries()]
-    return {"verdicts": rows, "quarantine": quarantine}
+    settings = store.auto_settings()
+    auto = {"enabled": settings.enabled, "daily_budget_usd": settings.daily_budget_usd,
+            "spent_today_usd": store.auto_spent_today(), "daily_judge_tokens": settings.daily_judge_tokens,
+            "judge_tokens_today": store.auto_judge_tokens_today()}
+    return {"verdicts": rows, "quarantine": quarantine, "auto": auto, "appeals": _appeals(library)}
 
 
 def _quarantine(body: QuarantineBody) -> dict:
@@ -94,5 +123,35 @@ async def quarantine(body: QuarantineBody) -> dict:
 
 
 @router.post("/release")
-async def release(body: ReleaseBody) -> dict:
+async def release(body: SkillModelBody) -> dict:
     return {"released": await asyncio.to_thread(store.release, body.skill, body.model)}
+
+
+@router.get("/appeal")
+async def appeal(skill: str, model: str) -> dict:
+    found = await asyncio.to_thread(lambda: next(
+        (a for a in _appeals(skills.library()) if (a["skill"], a["model"]) == (skill, model)), None))
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"{skill} has no appeal on {model}")
+    return found
+
+
+def _apply(body: ApplyBody) -> dict:
+    # The same command a terminal runs, so its checks (granted, unchanged since the draft, not
+    # locked, a loadable draft that passes Hermes' security scan) and its atomic write live in one
+    # place. The page asked the user to confirm already, hence --yes; --appeal refuses any appeal
+    # but the one the dialog named.
+    profile = profile_name_for_home(get_hermes_home())
+    if profile is None:
+        raise HTTPException(status_code=409, detail="Skill Court needs a Hermes profile home")
+    proc = procs.run([procs.hermes_binary(), "-p", profile, "court", "appeal", "apply", body.skill, "--model", body.model,
+                      "--appeal", str(body.appeal_id), "--yes"], timeout=120, check=False)
+    message = " ".join((proc.stdout or proc.stderr).split())
+    if proc.returncode != 0:
+        raise HTTPException(status_code=409, detail=message.removeprefix("Skill Court: "))
+    return {"ok": True, "message": message}
+
+
+@router.post("/appeal/apply")
+async def apply_appeal(body: ApplyBody) -> dict:
+    return await asyncio.to_thread(_apply, body)
