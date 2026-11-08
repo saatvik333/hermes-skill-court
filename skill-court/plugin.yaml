@@ -4,9 +4,10 @@ description: >-
   Measures whether each agent-written skill actually helps: replays real tasks with and
   without the skill, scores the difference (a sandbox check, or a blind pairwise judge when a
   task has none), and quarantines skills that make results worse for a given model, without
-  editing the skill's files. On by default within $1.00 a day: it tests each skill the agent
-  writes or changes, and re-tests one used on a model it was never tested on, in Docker
-  sandboxes or, without Docker, answer-only. Shows how often each skill is used, from session
+  editing the skill's files. On by default, on a $1.00 daily replay budget and 300,000 judge
+  tokens a day: it tests each skill the agent writes or changes, and re-tests one used on a model
+  its current version was never tested on, in Docker sandboxes or, without Docker, answer-only.
+  Shows how often each skill is used, from recent session
   history. An appeal drafts a fix and proves it on the same tasks; the fix is written only when
   the user applies it.
 author: saatvik333

@@ -1,8 +1,8 @@
 # Skill Court
 
 **Does the skill your agent wrote actually help?** Skill Court runs the same tasks twice, once with
-the skill and once without it, each run in its own Docker sandbox (or, without Docker, with
-read-only tools only), and compares the results. Skills that make results worse for a model are
+the skill and once without it, each run in its own Docker sandbox (or, without Docker, with only the
+skills, todo and web tools), and compares the results. Skills that make results worse for a model are
 hidden from that model; hiding never edits their files, and one command brings them back. An
 appeal goes one step further: it drafts a fix for the line that misled the model, proves the fix on
 the same tasks, and writes it only when you apply it.
@@ -10,9 +10,12 @@ the same tasks, and writes it only when you apply it.
 ## Install, then use Hermes as usual
 
 1. Every skill the agent writes or changes is tried in the background once its session ends.
-2. A skill the agent wrote that you use on a model it was never tested on is tried on that model.
-3. Replays run in Docker sandboxes when Docker answers, otherwise answer-only (read-only tools).
-4. It spends at most $1.00 a day of your provider on replays, plus 300,000 judge tokens.
+2. A skill the agent wrote that you use on a model its current version was never tested on is tried
+   on that model.
+3. Replays run in Docker sandboxes when Docker answers, otherwise answer-only (the skills, todo and
+   web tools only, judged on the final answers, success alone deciding).
+4. Replays stop for the day at $1.00 of your provider (runs already under way finish), the judge at
+   300,000 tokens.
 5. Verdicts arrive as a notice in the next turn; harmful skills are hidden from the model they hurt.
 
 For control: `hermes court auto off` stops it, `hermes court auto status` shows what it did,
@@ -73,7 +76,8 @@ hermes court trial --all
    sandbox (see [Disclosure](#disclosure)) and rebuilt for every skill, so nothing one trial did carries
    into the next.
 3. **Replays in pairs.** Each task runs in both profiles at the same time as a single-query session
-   (`hermes chat -Q --oneshot`), on your model or the one you pass, each run in a fresh Docker sandbox.
+   (`hermes chat -Q --oneshot`), on your model or the one you pass, each run in a fresh Docker sandbox
+   (no sandbox in [answer-only](#answer-only-trials) trials).
    The first four tasks run first. If every one of them ended the same way with and without the skill
    and token use stayed within the efficiency margin, the rest are not run: on the
    [benchmark](../README.md) this never changed a verdict and saved about 5% of replays.
@@ -88,7 +92,8 @@ hermes court trial --all
    tokens, i.e. 20% fewer); `neutral` when neither shows; `inconclusive` under three
    tasks with outcomes in both arms. A verdict needs its whole 95% bootstrap interval on one side,
    which with three tasks means every task moved the same way. Each verdict is tied to the skill's
-   content hash and the model.
+   content hash and the model. In answer-only trials only success decides (the token change is still
+   shown): there a run is one or two calls, so the call that loads the skill can double its tokens.
 6. **Says why it hurt.** For a `hurts` verdict, before the replay profiles are deleted, Skill Court
    takes a task the skill made fail, reads that run's transcript from the skill load to the final
    answer, and asks the judge for the cause and the one line of `SKILL.md` behind it (at most 16,000
@@ -156,16 +161,17 @@ hermes court auto off
 ```
 
 On by default. A profile that has never run `auto on` or `auto off` gets one notice at its first
-turn (in that session's chat only, like a verdict about it), saying that trials are on, what they
-spend and how to stop them; that it was queued is stored, so it is never repeated. `auto off` is
-stored and stays off. Then:
+turn (in that session's chat, like a verdict about it, and also on your own CLI, TUI or Desktop when
+someone else's message started that turn), saying that trials are on, what they spend and how to
+stop them; that it was queued is stored, so it is never repeated. `auto off` is stored and stays
+off. Then:
 
 1. When the agent creates, patches or edits a skill (the `on_skill_lifecycle` hook), the skill is
    queued with the session that changed it. When a session loads (`skill_view`) a skill the agent
    wrote, on a model that has no verdict on the skill's current content hash while another model
    has a verdict on it, the skill is queued for a trial on that model (a **re-check**), with the
-   session's provider. A re-check is queued once per session and model, and never when that model
-   already has a verdict on this version.
+   session's provider. A re-check is queued once per session and model. No trial runs for a version
+   that already has a verdict on its model, whether it was queued as a change or a re-check.
 2. When that session ends (`on_session_finalize`), or once it has gone 15 minutes without another
    change while the session stays open (`--quiet-minutes`, checked at the start of each turn), a
    background `hermes -p <profile> court trial --auto` starts. It waits for any trial already
@@ -173,16 +179,17 @@ stored and stays off. Then:
    unfinished (the runner was killed or could not start) is picked up by a new runner at most every
    30 minutes. A trial that failed for any other reason is closed with a notice and waits for the
    agent's next change to the skill, or the next session that uses it on that model.
-3. Changes run first, then re-checks, the skill loaded in the most sessions on that model first,
-   all from the same daily budget; what the budget does not reach waits for the next day. A change's
+3. Changes run first, then re-checks, the skill loaded on that model in the most sessions since it
+   was queued first, all from the same daily budget; what the budget does not reach waits for the
+   next day. A change's
    tasks are the requests of the session that changed the skill (except the turn that wrote the
    skill: asking for a skill is not a task the skill serves), plus the skill's registered and mined
    tasks; a re-check uses the registered and mined tasks. The replays use the same replay profiles
    as a manual trial: Docker sandboxes when a container runtime answers `docker version`, otherwise
    [answer-only](#answer-only-trials). The notice of a re-check starts with why it ran: "you used
-   it on M, which it was never tested on".
+   `X` on M; this version was never tested on M".
 4. A skill that `hurts` is quarantined for the model it hurt: it makes that model succeed less
-   often, or use at least 25% more tokens at equal success. When the agent changes a quarantined
+   often, or (in sandboxes) use at least 25% more tokens at equal success. When the agent changes a quarantined
    skill and its automatic trial comes out `helps` or `neutral`, the quarantine an earlier trial set
    for that model is lifted; one you set by hand stays, and the notice says the skill is still
    hidden and how to show it.
@@ -215,7 +222,10 @@ stored and stays off. Then:
 **How it spends money.** Every automatic trial is real replays on your provider, plus judge calls.
 Replays stop for the day once the provider-reported spend of today's automatic trials reaches the
 daily budget (`hermes court auto on --budget USD`, default $1.00; trials of three to five tasks on
-Claude Sonnet 5.5 cost $0.04 to $0.16 in our runs). A run whose provider reports no price stops
+Claude Sonnet 5.5 cost $0.04 to $0.18 in our runs; on Claude Haiku 5.5 under $0.02). Runs already
+under way when the budget is reached still finish, so a day can end a little over it. Web searches
+a replay makes use your own search keys and are outside this budget. A run whose provider reports
+no price stops
 automatic trials for that skill at once, with a notice, since the budget could not apply. The
 judge's calls (two per check-less task, one for a cause, one for an appeal's draft) are capped in
 tokens: once today's automatic judge calls have used `--judge-tokens` (default 300,000), no new
@@ -227,24 +237,31 @@ the Desktop page show today's spend and judge tokens.
 ## Answer-only trials
 
 When no container runtime answers `docker version` (or with `hermes court trial --answer-only`),
-trials still run, without sandboxes: the replay profiles keep only the read-only `skills`, `todo`
-and `web` toolsets (see [Disclosure](#disclosure)), so a replay cannot touch your machine. No
-check can run, so every pair goes to the [judge](#the-judge), which compares the two final answers
-in both orders. The trial records its mode, and the report, notices, Desktop page and dashboard
-API label its verdict `answer-only`.
+trials still run, without sandboxes: the replay profiles keep only the tools of the `skills`, `todo`
+and `web` toolsets (see [Disclosure](#disclosure)); `skill_manage` writes stay staged inside the
+replay profile, so a replay cannot touch your files. No check can run, so every pair goes to the
+[judge](#the-judge), which compares the two final answers in both orders, and only success decides
+the verdict: an answer-only run is one or two calls, so the call that loads the skill would decide a
+token verdict on its own. The trial records its mode, and the report, notices, Desktop page and
+dashboard API label its verdict `answer-only`.
 
 It measures what a skill makes the agent say or decide: a wrong rule, a convention the answer
 should follow, a fact it states. It does not measure procedures that need tools (writing files,
 running code), and a task that asks for a file is judged on what the answer says instead. An
-appeal runs its draft the way the appealed trial ran.
+appeal runs its draft the way the appealed trial ran. On `sales-csv-totals` with Claude Haiku 5.5
+(3 tasks), the sandbox trial was `neutral` at 100% → 67% (3 checked, $0.011, 78 s with building
+and removing the replay profiles); three answer-only trials were `neutral` at 100% → 67%, 100% → 67%
+and 100% → 33% (3 judged, $0.004 to $0.010 plus about 10,000 judge tokens each, 49 to 80 s). The
+same task was lost in every mode; token changes ranged from -9% to +30%.
 
 ## In use
 
-`hermes court report` and the Desktop page show, per skill, how it is used, read from session
-history with no model call and no spend: the turns and sessions in which the agent loaded it, per
-model; the share of tool calls that failed from the turn it loaded in onwards, against the same
-sessions' earlier turns; and how often the agent changed it (`skill_manage`) after loading it in a
-session. For example: "loaded in 9 turns of 7 sessions (5 on claude-sonnet-5-5, 2 on
+`hermes court report` and the Desktop page show, per skill, how it is used, read from the 500 most
+recent sessions with no model call and no spend, including turns an in-place compaction archived:
+the turns and sessions in which the agent loaded it, per model; the share of tool calls that failed
+from the turn it loaded in onwards, against the same sessions' earlier turns; and how often the
+agent changed it (a `skill_manage` that neither failed nor only staged its write) after loading it
+in a session. For example: "loaded in 9 turns of 7 sessions (5 on claude-sonnet-5-5, 2 on
 claude-haiku-5-5); 3 of 40 tool calls failed from the turn it loaded in on, 1 of 25 before it;
 changed 2 times after it loaded". It is evidence, not a verdict: a skill loads on the tasks it is
 for, so those turns are not comparable with the others. Changes made by Hermes' background review
@@ -430,8 +447,10 @@ hermes -p courtlab court report
 ## Disclosure
 
 - **Runs commands when you run `hermes court trial`, or with automatic trials on:**
-  `hermes profile create/delete`, `hermes -p … config set/get` and `hermes -p … tools disable` for
-  the replay profiles, `hermes -p <replay profile> chat -Q --oneshot` for each run, and `docker` (or
+  `hermes profile create/delete`, `hermes -p … config set/get`, `hermes -p … tools disable` and
+  `hermes -p … plugins disable skill-court` (so a gateway serving every profile drops the plugins
+  it loaded for the clone) for the replay profiles, `hermes -p <replay profile> chat -Q --oneshot`
+  for each run, and `docker` (or
   `podman`) `version`, `ps`, `inspect`, `exec` (the task's check, or a `find | tar` into a temporary
   file in the sandbox, then `base64`, that reads the run's files for the judge) and `rm -f` on the
   replay sandboxes.
@@ -439,8 +458,8 @@ hermes -p courtlab court report
   off`):** `hermes -p <profile> court trial --auto`, in its own process session, started by a hook
   in the process running your session (normally the gateway), without the Hermes launch flags of
   that process's environment. It writes to `plugin-data/skill-court/auto.log` and exits when the
-  queue is empty. It spends at most the daily budget ($1.00 by default) on replays and the daily
-  judge tokens (300,000 by default) on judge calls.
+  queue is empty. Replays stop for the day at the daily budget ($1.00 by default; runs under way
+  finish) and judge calls at the daily judge tokens (300,000 by default).
 - **Creates two profiles while it tests a skill,** `court-<id>-with` and `court-<id>-without`, where
   `<id>` is derived from your profile's name. They are cloned with `hermes profile create
   --clone-from` (config, API keys, SOUL, memory, skills; never messaging channels), rebuilt for each
@@ -468,16 +487,18 @@ hermes -p courtlab court report
   computer use, browser, cron jobs, memory, session search, connections, kanban, image, video and
   speech generation. Environment variables that a loaded skill declares it needs are still passed
   into the sandbox, as in normal Hermes use, and web search uses your own search keys. **Answer-only
-  mode** (no container runtime answers, or `--answer-only`): no Docker, and only the `skills`,
-  `todo` and `web` toolsets stay on. Every other toolset Hermes lists (`toolsets.get_toolset_names()`
-  when the profile is built, so ones added in later Hermes versions too) goes into
-  `agent.disabled_toolsets`, which Hermes subtracts last; the build is refused if a tool outside
-  those three toolsets would remain. Web search and extraction use your own search keys.
+  mode** (no container runtime answers, or `--answer-only`): no Docker, and only the tools of the
+  `skills`, `todo` and `web` toolsets stay. Every other toolset Hermes lists
+  (`toolsets.get_toolset_names()` when the profile is built, so ones added in later Hermes versions
+  too) whose tools all lie outside those three goes into `agent.disabled_toolsets`, which Hermes
+  subtracts last; a toolset that mixes them with others (`coding`, `hermes-cli`) is not listed, and
+  its other tools are removed with the basic toolsets that hold them. The build is refused if a tool
+  outside those three toolsets would remain. Web search and extraction use your own search keys.
 - **Reads:** session history through Hermes' read-only `SessionDB` (including the transcripts of its
   own replays, the platform, sender and chat Hermes recorded for each session that changed or used a
   skill, and for the session of a turn a verdict may be meant for, to decide who is told it; and,
-  for the "in use" evidence in `hermes court report`, the Desktop page and the order of re-checks,
-  every session's model, `skill_view` and `skill_manage` calls and tool results), the skill catalog
+  for the "in use" evidence in `hermes court report` and the Desktop page, the 500 most recent
+  sessions' model, `skill_view` and `skill_manage` calls and tool results), the skill catalog
   through Hermes' public skill helpers and the skills directory's `.usage.json`, and
   `skills.disabled` / `model.default` / `agent.disabled_toolsets` through `hermes config get`. An
   appeal's draft is read with Hermes' `agent.skill_utils.parse_frontmatter` and scanned with
