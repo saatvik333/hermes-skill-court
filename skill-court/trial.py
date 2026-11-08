@@ -109,53 +109,64 @@ def check_outcome(task: store.Task, _rep: int, with_run: runner.RunResult,
     return _success(with_run, has_check), _success(without_run, has_check)
 
 
+# Tasks replayed before deciding whether the rest are needed (see ``scoring.settled_early``).
+FIRST_WAVE = 4
+
+
 def adjudicate(tasks: list[store.Task], replay: Replay, opts: Options, budget: Budget, record: Record,
                say: Callable[[str], None], outcome: PairOutcome = check_outcome) -> tuple[scoring.Score, Counter]:
     """Replay ``tasks`` in both arms and score the pairs. ``replay(task, arm)`` runs one arm once;
     ``record`` sees every result; ``outcome`` turns each finished pair into its two successes.
+    The first ``FIRST_WAVE`` tasks run first; the rest run only when those leave something to settle.
     Returns the score and how often each model answered."""
     chosen = tasks[: opts.tasks]
-    queue = deque((task, rep) for rep in range(opts.reps) for task in chosen)
+    by_id = {task.id: task for task in chosen}
     results: dict[tuple[int, int], dict[str, runner.RunResult]] = {}
-    total = len(queue) * len(ARMS)
+    pairs: dict[tuple[int, int], scoring.Pair] = {}
+    total = len(chosen) * opts.reps * len(ARMS)
     finished = 0
     slots = max(len(ARMS), opts.parallel)
 
-    with ThreadPoolExecutor(max_workers=slots) as pool:
-        in_flight: dict[Future, tuple[store.Task, int, str]] = {}
-        while queue or in_flight:
-            # Both arms of a pair start together, so time-of-day effects hit them equally.
-            while queue and len(in_flight) + len(ARMS) <= slots and not budget.exhausted:
-                task, rep = queue.popleft()
-                for arm in ARMS:
-                    in_flight[pool.submit(replay, task, arm)] = (task, rep, arm)
-            if not in_flight:
-                say(f"  {budget.why_stopped()}; {len(queue)} pair(s) not run")
-                break
-            done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-            for future in done:
-                task, rep, arm = in_flight.pop(future)
-                result = future.result()
-                budget.add(result)
-                record(task, rep, arm, result)
-                results.setdefault((task.id, rep), {})[arm] = result
-                finished += 1
-                say(f"  [{finished}/{total}] task {task.id} {arm:<7} {_describe(result, task.check_cmd is not None)}")
+    def run_wave(wave: list[store.Task]) -> None:
+        nonlocal finished
+        queue = deque((task, rep) for rep in range(opts.reps) for task in wave)
+        with ThreadPoolExecutor(max_workers=slots) as pool:
+            in_flight: dict[Future, tuple[store.Task, int, str]] = {}
+            while queue or in_flight:
+                # Both arms of a pair start together, so time-of-day effects hit them equally.
+                while queue and len(in_flight) + len(ARMS) <= slots and not budget.exhausted:
+                    task, rep = queue.popleft()
+                    for arm in ARMS:
+                        in_flight[pool.submit(replay, task, arm)] = (task, rep, arm)
+                if not in_flight:
+                    say(f"  {budget.why_stopped()}; {len(queue)} pair(s) not run")
+                    break
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    task, rep, arm = in_flight.pop(future)
+                    result = future.result()
+                    budget.add(result)
+                    record(task, rep, arm, result)
+                    results.setdefault((task.id, rep), {})[arm] = result
+                    finished += 1
+                    say(f"  [{finished}/{total}] task {task.id} {arm:<7} {_describe(result, task.check_cmd is not None)}")
+        for key, by_arm in results.items():
+            if key in pairs or len(by_arm) != len(ARMS):
+                continue
+            with_run, without_run = by_arm["with"], by_arm["without"]
+            with_ok, without_ok = outcome(by_id[key[0]], key[1], with_run, without_run)
+            pairs[key] = scoring.Pair(key[0], scoring.Arm(with_ok, with_run.tokens),
+                                      scoring.Arm(without_ok, without_run.tokens))
 
-    by_id = {task.id: task for task in chosen}
-    pairs = []
-    for (task_id, rep), by_arm in results.items():
-        if len(by_arm) != len(ARMS):
-            continue
-        with_run, without_run = by_arm["with"], by_arm["without"]
-        with_ok, without_ok = outcome(by_id[task_id], rep, with_run, without_run)
-        pairs.append(scoring.Pair(
-            task_id,
-            scoring.Arm(with_ok, with_run.tokens),
-            scoring.Arm(without_ok, without_run.tokens),
-        ))
+    first, rest = chosen[:FIRST_WAVE], chosen[FIRST_WAVE:]
+    run_wave(first)
+    if rest and scoring.settled_early(list(pairs.values())):
+        say(f"  stopped after {len(first)} task(s): every pair ended the same way in both arms and token use "
+            f"stayed within the efficiency margin, so the other {len(rest)} were not run")
+    elif rest:
+        run_wave(rest)  # past the budget it only reports the pairs it could not run
     observed = Counter(r.model for by_arm in results.values() for r in by_arm.values() if r.model)
-    return scoring.score(pairs), observed
+    return scoring.score(list(pairs.values())), observed
 
 
 def _regressions(decided: dict[tuple[int, int], tuple[bool, bool]]) -> tuple[int, int]:

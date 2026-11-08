@@ -49,3 +49,29 @@ def test_a_quarantine_set_by_hand_or_a_manual_trial_keeps_the_skill_hidden(skill
     assert not run(skill, auto=False).released  # a manual trial only ever adds quarantines
     assert not run(skill, auto=True, apply=False).released  # an appeal's draft trial changes none
     assert skill.name in store.hidden_for(MODEL)
+
+
+def _adjudicate(n_tasks, passes):
+    """``passes(task_id, arm)``: whether that run passes; every run uses the same tokens."""
+    tasks = [store.Task(i, "s", f"task {i}", "check", "manual", None) for i in range(n_tasks)]
+    ran = []
+
+    def replay(task, arm):
+        ran.append((task.id, arm))
+        return RunResult(model=MODEL, completed=True, passed=passes(task.id, arm), tokens=1_000, cost_usd=0.0)
+
+    score, _ = trial.adjudicate(tasks, replay, trial.Options(tasks=n_tasks), trial.Budget(5.0, False),
+                                lambda *_: None, lambda _line: None)
+    return score, {task_id for task_id, _arm in ran}
+
+
+def test_a_first_wave_with_no_difference_settles_the_trial_without_the_rest():
+    score, ran = _adjudicate(6, lambda _task, _arm: True)
+    assert ran == set(range(trial.FIRST_WAVE)) and score.verdict == scoring.NEUTRAL
+
+
+def test_any_difference_in_the_first_wave_runs_every_task():
+    # The skill breaks every task but task 1, so the first wave differs and the rest are run too.
+    score, ran = _adjudicate(6, lambda task, arm: arm == "without" or task == 1)
+    assert ran == set(range(6))
+    assert score.verdict == scoring.HURTS

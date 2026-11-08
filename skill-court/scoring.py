@@ -110,3 +110,14 @@ def score(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0
         if success_delta >= 0 and token_ci[1] < 1 / (1 + efficiency_margin) - 1:
             return result(HELPS, f"{change}, and runs used {_pct(token_change)} tokens with the skill")
     return result(NEUTRAL, "no measurable difference in success or token use")
+
+
+def settled_early(pairs: list[Pair], *, min_tasks: int = 3, efficiency_margin: float = 0.25) -> bool:
+    """Whether the first pairs already show nothing worth more replays: every judged pair ended the
+    same way in both arms, on at least ``min_tasks`` tasks, and the skill's token change is inside the
+    efficiency margin (between 1/1.25 and 1.25 times the tokens for the default)."""
+    judged = [p for p in pairs if p.with_skill.success is not None and p.without_skill.success is not None]
+    if len({p.task for p in judged}) < min_tasks or any(p.with_skill.success != p.without_skill.success for p in judged):
+        return False
+    change = score(pairs, min_tasks=min_tasks, efficiency_margin=efficiency_margin).token_change
+    return change is not None and abs(math.log1p(change)) < math.log1p(efficiency_margin)
