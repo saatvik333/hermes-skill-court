@@ -1,6 +1,6 @@
 // Skill Court page for Hermes Desktop: the latest verdict per skill and model, the quarantine
-// switch, and fixes proposed by appeals. Data comes from this plugin's backend
-// (dashboard/plugin_api.py) through ctx.rest.
+// switch, fixes proposed by appeals, and the switch for automatic trials. Data comes from this
+// plugin's backend (dashboard/plugin_api.py) through ctx.rest.
 import {
   Badge,
   Button,
@@ -326,7 +326,56 @@ const usd = x => `$${(x ?? 0).toFixed(2)}`
 
 const NOTE = 'max-w-prose text-[0.6875rem] text-(--ui-text-tertiary)'
 
-function Summary({ verdicts, quarantine, auto, usageLabel }) {
+// Automatic trials start off; turning them on spends provider money, so the page asks first.
+function AutoSwitch({ auto, setAuto }) {
+  const [open, setOpen] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState(null)
+  const tokens = (auto.daily_judge_tokens ?? 0).toLocaleString()
+  const turnOff = async () => {
+    setPending(true)
+    setError(null)
+    try {
+      await setAuto(false)
+    } catch (err) {
+      setError(`Could not turn them off: ${err?.message ?? err}`)
+    } finally {
+      setPending(false)
+    }
+  }
+  return jsxs('div', {
+    className: 'flex flex-wrap items-center gap-2 text-sm text-(--ui-text-secondary)',
+    children: [
+      jsx('p', {
+        children: auto.enabled
+          ? `Automatic trials are on: ${usd(auto.spent_today_usd)} of ${usd(auto.daily_budget_usd)} spent today; the judge used ${(auto.judge_tokens_today ?? 0).toLocaleString()} of ${tokens} tokens.`
+          : 'Automatic trials are off: a skill is tested only when you run `hermes court trial`.'
+      }),
+      auto.enabled
+        ? jsx(Button, {
+            'aria-disabled': pending || undefined,
+            onClick: () => (pending ? undefined : turnOff()),
+            size: 'sm',
+            variant: 'outline',
+            children: pending ? 'Turning off…' : 'Turn off'
+          })
+        : jsx(Button, { onClick: () => setOpen(true), size: 'sm', variant: 'outline', children: 'Turn on…' }),
+      error ? jsx('span', { className: 'text-[0.6875rem] text-destructive', role: 'alert', children: error }) : null,
+      jsx(ConfirmDialog, {
+        busyLabel: 'Turning on…',
+        confirmLabel: 'Turn on',
+        description: `Skill Court will test each skill the agent writes or changes, and each skill the agent wrote the first time you use its current version on a model, by replaying its tasks with and without the skill in the background (in Docker sandboxes when Docker answers, otherwise with only the skills, todo and web tools). Replays stop for the day at ${usd(auto.daily_budget_usd)} of your provider (runs already under way finish), and the judge at ${tokens} tokens a day. Turn them off here or with \`hermes court auto off\`.`,
+        doneLabel: 'On',
+        onClose: () => setOpen(false),
+        onConfirm: () => setAuto(true),
+        open,
+        title: 'Turn on automatic trials?'
+      })
+    ]
+  })
+}
+
+function Summary({ verdicts, quarantine, usageLabel }) {
   const counts = verdicts.reduce((acc, v) => ({ ...acc, [v.verdict]: (acc[v.verdict] ?? 0) + 1 }), {})
   const parts = ['hurts', 'helps', 'neutral', 'inconclusive']
     .filter(k => counts[k])
@@ -338,11 +387,6 @@ function Summary({ verdicts, quarantine, auto, usageLabel }) {
     children: [
       jsx('p', {
         children: `${verdicts.length} verdict${verdicts.length === 1 ? '' : 's'}: ${parts.join(', ')}. ${quarantine.length} quarantine${quarantine.length === 1 ? '' : 's'} active.`
-      }),
-      jsx('p', {
-        children: auto?.enabled
-          ? `Automatic trials are on: ${usd(auto.spent_today_usd)} of ${usd(auto.daily_budget_usd)} spent today; the judge used ${(auto.judge_tokens_today ?? 0).toLocaleString()} of ${(auto.daily_judge_tokens ?? 0).toLocaleString()} tokens.`
-          : 'Automatic trials are off. Turn them on with `hermes court auto on`.'
       }),
       judged
         ? jsx('p', {
@@ -439,6 +483,16 @@ function SkillCourtPage({ rest, source }) {
     }
   }
 
+  // Throws on failure: the confirmation dialog, or the switch, shows it.
+  const setAuto = async enabled => {
+    try {
+      await rest('/auto', { method: 'POST', body: { enabled } })
+      setAnnouncement(enabled ? 'Automatic trials are on.' : 'Automatic trials are off.')
+    } finally {
+      await queryClient.invalidateQueries({ queryKey })
+    }
+  }
+
   let body
   if (query.isPending) {
     body = jsx(Loader, {})
@@ -476,12 +530,11 @@ function SkillCourtPage({ rest, source }) {
         appeal: (appeals ?? []).find(a => a.skill === v.skill && a.model === v.model),
         inUse: index === 0 || sorted[index - 1].skill !== v.skill ? inUse[v.skill] : undefined
       }))
-    body = verdicts.length
+    const verdictsView = verdicts.length
       ? jsxs('div', {
           className: 'flex flex-col gap-6',
           children: [
             jsx(Summary, {
-              auto,
               quarantine,
               usageLabel: Object.keys(inUse).length ? usageQuery.data.label : undefined,
               verdicts
@@ -531,6 +584,10 @@ function SkillCourtPage({ rest, source }) {
             'With automatic trials on, a skill gets a verdict after the agent writes or changes it. To try existing skills now, run `hermes court trial --all` in a terminal.',
           title: 'No verdicts yet'
         })
+    body = jsxs('div', {
+      className: 'flex flex-col gap-6',
+      children: [jsx(AutoSwitch, { auto, setAuto }), verdictsView]
+    })
   }
 
   return jsxs('div', {

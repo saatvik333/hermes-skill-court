@@ -1,17 +1,17 @@
 """Automatic trials: test a skill after the agent writes or changes it, within a daily budget.
 
-On by default; ``hermes court auto off`` stops it. The first turn of a profile that runs on the
-defaults gets one notice saying so. The ``on_skill_lifecycle`` hook queues each skill the agent
-creates, patches or edits, keyed by the session that changed it, and each agent-written skill a
-session loads on a model that has no verdict on its current version (a re-check on that model; this
-covers skills written before the plugin was installed). When that session ends
-(``on_session_finalize``), or once it has been quiet for ``quiet_minutes`` (checked at the start of
-any later turn), a detached ``hermes -p
-<profile> court trial --auto`` runs the queue in the background with the same replay profiles as a
-manual trial (sandboxes when Docker answers, else answer-only), appending its output to
-``plugin-data/skill-court/auto.log``. A runner is started again for work it left unfinished at most
-every ``RETRY_MINUTES``. A skill that hurts is quarantined for the model it hurt; a skill that no
-longer hurts gets the quarantine an earlier trial set lifted. Each verdict is posted once with
+Off until the user turns it on with ``hermes court auto on`` (or the Desktop page); the first turn of
+a profile where nobody has chosen gets one notice saying how. Once on, the ``on_skill_lifecycle``
+hook queues each skill the agent creates, patches or edits, keyed by the session that changed it,
+and each agent-written skill a session loads on a model that has no verdict on its current version
+(a re-check on that model; this covers skills written before the plugin was installed). When that
+session ends (``on_session_finalize``), or once it has been quiet for ``quiet_minutes`` (checked at
+the start of any later turn), a detached ``hermes -p <profile> court trial --auto`` runs the queue in
+the background with the same replay profiles as a manual trial (sandboxes when Docker answers, else
+answer-only), appending its output to ``plugin-data/skill-court/auto.log``. A runner is started
+again for work it left unfinished at most every ``RETRY_MINUTES``. A skill that hurts is quarantined
+for the model it hurt; a skill that no longer hurts gets the quarantine an earlier trial set lifted.
+Each verdict is posted once with
 ``ctx.post_message`` (a notice beside the conversation, never text in the model's context) into the
 next turn of the session that changed or loaded the skill or another session of the same sender on
 the same platform; a session on the owner's own clients, or of a sender Hermes did not record, is
@@ -73,14 +73,15 @@ def _queue_recheck(skill: str, session_id: str) -> None:
 
 
 def first_run_notice(settings: store.AutoSettings) -> str:
-    """What a profile running automatic trials on their defaults is told, once."""
-    return (f"Skill Court is on: it tests each skill the agent writes or changes, and each skill the agent wrote "
-            "(before or after you installed it) the first time you use its current version on a model, by "
-            "replaying its tasks with and without the skill (in "
+    """What a profile where nobody has turned automatic trials on or off is told, once."""
+    return ("Skill Court is installed. Automatic trials are off until you turn them on with "
+            "`hermes court auto on` (or on the Skill Court page in Hermes Desktop). Once on, it tests each skill the "
+            "agent writes or changes, and each skill the agent wrote (before or after you installed it) the first "
+            "time you use its current version on a model, by replaying its tasks with and without the skill (in "
             "sandboxes when Docker is available, otherwise with only the skills, todo and web tools). Replays "
             f"stop for the day at ${settings.daily_budget_usd:.2f} of your provider (runs already under way finish), "
-            f"and the judge at {settings.daily_judge_tokens:,} tokens. `hermes court auto off` stops it; "
-            "`hermes court auto status` shows what it did.")
+            f"and the judge at {settings.daily_judge_tokens:,} tokens. `hermes court trial <skill>` tests one skill "
+            "now.")
 
 
 def _launch(settings: store.AutoSettings) -> None:
@@ -113,19 +114,19 @@ def _read_origin(session_id: str) -> tuple[str | None, str | None, str | None]:
 
 
 def notifier(ctx: Any) -> Callable[..., None]:
-    """The ``pre_llm_call`` hook: start trials whose changes went quiet, tell a profile on the default
-    settings once that automatic trials are on, and post the notices meant for this turn's session. It
-    returns nothing, so nothing is added to the model's context."""
+    """The ``pre_llm_call`` hook: start trials whose changes went quiet, tell a profile where nobody
+    has chosen once how to turn automatic trials on, and post the notices meant for this turn's
+    session. It returns nothing, so nothing is added to the model's context."""
     def on_pre_llm_call(session_id: str = "", platform: str = "", sender_id: str = "", **_: Any) -> None:
         settings = store.auto_settings()
         if settings.enabled:
             _launch(settings)
-            if store.first_run_due():
-                # Addressed like a verdict about this session, so it reaches this turn and no other chat;
-                # when someone else's message started it, the owner gets a copy on their own clients.
-                o = origin(session_id)
-                audience = [o] if o.sender is None else [o, store.Origin(None, store.LOCAL, None)]
-                store.queue_first_run_notice(first_run_notice(settings), audience)
+        elif store.first_run_due():
+            # Addressed like a verdict about this session, so it reaches this turn and no other chat;
+            # when someone else's message started it, the owner gets a copy on their own clients.
+            o = origin(session_id)
+            audience = [o] if o.sender is None else [o, store.Origin(None, store.LOCAL, None)]
+            store.queue_first_run_notice(first_run_notice(settings), audience)
         surface = platform or ctx.session_surface()
         local = surface in LOCAL_SURFACES
         # The turn's chat, read only when a notice waits for this sender on this platform.

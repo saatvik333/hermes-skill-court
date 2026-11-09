@@ -83,7 +83,8 @@ def setup(parser: argparse.ArgumentParser) -> None:
     ap.add_argument("--appeal", type=int, metavar="ID",
                     help="appeal apply: write only this appeal's fix, refused when it is no longer the latest")
 
-    a = subs.add_parser("auto", help="Test skills automatically after the agent writes or changes them (on by default)")
+    a = subs.add_parser("auto", help="Test skills automatically after the agent writes or changes them (off until you "
+                                     "turn it on)")
     asubs = a.add_subparsers(dest="auto_command")
     on = asubs.add_parser("on", help="Turn automatic trials on, or change their limits")
     on.add_argument("--budget", type=_positive(float),
@@ -599,7 +600,8 @@ def _cmd_auto(args: argparse.Namespace) -> int:
               "on again with `hermes court auto on`.")
         return 0
     if command == "status":
-        print(f"Automatic trials: on; they run {_mode_now()}" if settings.enabled else "Automatic trials: off")
+        print(f"Automatic trials: on; they run {_mode_now()}" if settings.enabled
+              else "Automatic trials: off (turn them on with `hermes court auto on`)")
         print(f"Spent today: ${store.auto_spent_today():.2f} of ${settings.daily_budget_usd:.2f} "
               "(replays, and judge calls Hermes priced, as reported by the provider)")
         print(f"Judge today: {store.auto_judge_tokens_today():,} of {settings.daily_judge_tokens:,} tokens")

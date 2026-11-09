@@ -38,16 +38,21 @@ def court(*argv):
     return cli.dispatch(parser.parse_args(list(argv)), None)
 
 
-def test_automatic_trials_are_on_by_default_and_an_explicit_off_stays_off():
-    assert store.auto_settings() == store.AutoSettings(True, 1.0, 15.0, 300_000)
-    auto.on_skill_lifecycle(action="installed", skill_name="hub-skill", session_id="s1")
+def test_automatic_trials_are_off_until_the_user_turns_them_on_and_an_explicit_off_stays_off(started):
+    assert store.auto_settings() == store.AutoSettings(False, 1.0, 15.0, 300_000)
     auto.on_skill_lifecycle(action="created", skill_name="csv-totals", session_id="s1")
-    assert [(r["skill"], r["session_id"], r["state"]) for r in rows()] == [("csv-totals", "s1", "pending")]
+    auto.on_session_finalize(session_id="s1")
+    assert rows() == [] and started == []
+    assert court("auto", "on") == 0
+    assert store.auto_settings() == store.AutoSettings(True, 1.0, 15.0, 300_000)
+    auto.on_skill_lifecycle(action="installed", skill_name="hub-skill", session_id="s2")
+    auto.on_skill_lifecycle(action="created", skill_name="csv-totals", session_id="s2")
+    assert [(r["skill"], r["session_id"], r["state"]) for r in rows()] == [("csv-totals", "s2", "pending")]
     assert court("auto", "off") == 0
     assert store.auto_settings() == store.AutoSettings(False, 1.0, 15.0, 300_000)
-    auto.on_skill_lifecycle(action="patched", skill_name="json-format", session_id="s2")
+    auto.on_skill_lifecycle(action="patched", skill_name="json-format", session_id="s3")
     assert [r["skill"] for r in rows()] == ["csv-totals"]
-    assert turn() == []  # nor is the user told it is on
+    assert turn() == []  # the user has chosen: no first-run notice
 
 
 def test_a_change_waits_for_its_session_to_end(started):
@@ -410,7 +415,7 @@ def finished(skill, skill_hash, model):
     store.finish_trial(store.start_trial(skill, skill_hash, model, auto=True), model, scoring.NEUTRAL, "{}")
 
 
-def test_a_skill_used_on_a_model_with_no_verdict_on_its_version_is_queued_for_that_model(monkeypatch):
+def test_a_skill_used_on_a_model_with_no_verdict_on_its_version_is_queued_for_that_model(monkeypatch, chosen):
     version = {"csv-totals": "v1", "json-format": "v1", "hub-skill": "v1", "written-before-install": "v1"}
     monkeypatch.setattr(auto.skills, "find", lambda name: SimpleNamespace(
         name=name, agent_authored=name != "hub-skill", content_hash=lambda: version[name]))
@@ -503,7 +508,8 @@ def test_the_first_run_notice_is_posted_once_in_its_own_chat_and_to_the_owner(mo
     monkeypatch.setattr(auto.mining, "session_origin",
                         lambda session: {"tg-1": ("telegram", "42", "dm-42")}.get(session, (None, None, None)))
     [text] = turn(session_id="tg-1", platform="telegram", sender="42")
-    assert text.startswith("Skill Court is on") and "$1.00 of your provider" in text and "`hermes court auto off`" in text
+    assert text.startswith("Skill Court is installed") and "`hermes court auto on`" in text
+    assert "$1.00 of your provider" in text and store.auto_settings().enabled is False
     assert turn(session_id="tg-2", platform="telegram", sender="7") == []
     # A Telegram sender's message started it: the owner is told too, on their own clients, once.
     assert turn(session_id="cli-9", platform="cli") == [text]
@@ -515,7 +521,7 @@ def test_the_first_run_notice_is_posted_once_in_its_own_chat_and_to_the_owner(mo
 def test_the_owners_first_run_notice_is_queued_once(monkeypatch):
     monkeypatch.setattr(auto.mining, "session_origin", lambda _session: ("local", None, None))
     [text] = turn(session_id="cli-1", platform="cli")
-    assert text.startswith("Skill Court is on")
+    assert text.startswith("Skill Court is installed")
     assert turn(session_id="cli-2", platform="cli") == [] and len(store.notices(10)) == 1
 
 

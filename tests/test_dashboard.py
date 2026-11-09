@@ -49,3 +49,12 @@ def test_the_desktop_applies_only_the_appeal_its_dialog_showed(plugin_api, monke
     assert plugin_api._apply(body)["ok"]
     assert commands == [["hermes", "-p", "default", "court", "appeal", "apply", "csv-totals",
                          "--model", "claude-sonnet-5-5", "--appeal", "7", "--yes"]]
+
+
+def test_the_desktop_switch_changes_only_whether_automatic_trials_run(plugin_api):
+    store = plugin_api.store
+    store.set_auto_settings(store.AutoSettings(False, 2.5, 30.0, 50_000))  # limits the user set earlier
+    assert plugin_api._set_auto(plugin_api.AutoBody(enabled=True)) == {"enabled": True}
+    assert store.auto_settings() == store.AutoSettings(True, 2.5, 30.0, 50_000)
+    plugin_api._set_auto(plugin_api.AutoBody(enabled=False))
+    assert store.auto_settings() == store.AutoSettings(False, 2.5, 30.0, 50_000)

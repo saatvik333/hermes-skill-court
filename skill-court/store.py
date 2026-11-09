@@ -195,7 +195,7 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
         " SELECT skill, session_id, state, changed_at, ended_at, trial_id, note, last_attempt_at FROM auto_queue",
         "DROP TABLE auto_queue",
         "ALTER TABLE auto_queue_6 RENAME TO auto_queue",
-        # The notice that told the owner automatic trials are on by default: queued once per profile.
+        # The first-run notice (how to turn automatic trials on): queued once per profile.
         """CREATE TABLE first_run (
             id         INTEGER PRIMARY KEY CHECK (id = 1),
             notice_id  INTEGER NOT NULL REFERENCES notices (id),
@@ -489,9 +489,9 @@ class AutoSettings:
     daily_judge_tokens: int
 
 
-# A new install tests skills automatically on a $1.00 daily replay budget; ``auto off`` or ``auto on``
-# stores a row.
-AUTO_DEFAULTS = AutoSettings(enabled=True, daily_budget_usd=1.0, quiet_minutes=15.0, daily_judge_tokens=300_000)
+# Automatic trials are off until the user turns them on (``auto on``, or the Desktop page); ``auto
+# on`` and ``auto off`` store a row. The limits are what ``auto on`` uses unless told otherwise.
+AUTO_DEFAULTS = AutoSettings(enabled=False, daily_budget_usd=1.0, quiet_minutes=15.0, daily_judge_tokens=300_000)
 
 
 def auto_settings() -> AutoSettings:
@@ -704,8 +704,8 @@ def add_notice(trial_id: int | None, text: str, origin: Origin) -> None:
         _insert_notice(conn, trial_id, text, origin)
 
 
-# Due while no first-run notice was queued and automatic trials run on their defaults: once
-# ``auto on`` or ``auto off`` stored settings, the user has chosen and is not told again.
+# Due while no first-run notice was queued and the user has not chosen: once ``auto on`` or ``auto
+# off`` stored settings, they know about automatic trials and are not told again.
 _FIRST_RUN_DUE = "SELECT NOT EXISTS (SELECT 1 FROM first_run) AND NOT EXISTS (SELECT 1 FROM auto_settings)"
 
 

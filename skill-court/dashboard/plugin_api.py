@@ -1,4 +1,5 @@
-"""Desktop backend: verdicts, usage evidence, quarantine and appeals, under /api/plugins/skill-court/."""
+"""Desktop backend: verdicts, usage evidence, quarantine, appeals and the automatic-trials switch,
+under /api/plugins/skill-court/."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import asyncio
 import importlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -43,6 +45,10 @@ class SkillModelBody(BaseModel):
 
 class ApplyBody(SkillModelBody):
     appeal_id: int  # the appeal the page's dialog showed; nothing else is applied
+
+
+class AutoBody(BaseModel):
+    enabled: bool
 
 
 def _appeals(library: dict) -> list[dict]:
@@ -102,6 +108,13 @@ def _quarantine(body: QuarantineBody) -> dict:
     return {"ok": True}
 
 
+def _set_auto(body: AutoBody) -> dict:
+    # What `hermes court auto on` without options and `auto off` store: only the switch changes, the
+    # limits stay as they were. The page asked the user to confirm turning it on.
+    store.set_auto_settings(replace(store.auto_settings(), enabled=body.enabled))
+    return {"enabled": body.enabled}
+
+
 # SQLite and skill hashing block, so they run off the event loop; to_thread carries the request's
 # context (the profile it is scoped to) into the worker thread.
 @router.get("/verdicts")
@@ -124,6 +137,11 @@ async def quarantine(body: QuarantineBody) -> dict:
 @router.post("/release")
 async def release(body: SkillModelBody) -> dict:
     return {"released": await asyncio.to_thread(store.release, body.skill, body.model)}
+
+
+@router.post("/auto")
+async def set_auto(body: AutoBody) -> dict:
+    return await asyncio.to_thread(_set_auto, body)
 
 
 @router.get("/appeal")
