@@ -25,6 +25,9 @@ written only when you apply it.
   defaults (6 tasks, about 11.5 replays per skill) it quarantines 1.3% of harmless skills and catches
   44% of harmful ones: 66% of skills that break the tasks they touch, fewer of the subtle ones.
   `--tasks` buys more.
+- Opt-in, checked live with 1.2.1 on 9 Nov 2026: `plugins install` showed how to turn automatic
+  trials on; the first chat turn posted the same, once; `auto status` stayed off until **Turn on…**
+  on the Desktop page, which asked first and kept the $1.00 limit; **Turn off** switched it back.
 - Live on Hermes 0.23 (8 Nov 2026, Skill Court 1.2.0, which ran automatic trials without being
   turned on; 1.2.1 waits for `auto on`), in a fresh profile: after Hermes' review saved
   `sales-export-totals` from "our sales exports are
